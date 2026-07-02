@@ -14,6 +14,7 @@ import blur_core as bc
 import media_tools as mt
 from app_config import AppConfig
 from exporter import VideoExporter
+from masks import Mask
 
 
 class SubtitleBlurApp(ctk.CTk):
@@ -110,8 +111,11 @@ class SubtitleBlurApp(ctk.CTk):
         self.frame_size: Optional[Tuple[int, int]] = None
         self.preview_scale = 1.0
         self.preview_offset: Tuple[int, int] = (0, 0)
-        self.roi: Optional[Tuple[int, int, int, int]] = None
-        self.roi_map: dict[str, Tuple[int, int, int, int]] = {}
+        # 每个视频一组遮罩；active_mask_index 指向当前编辑的遮罩。
+        self.masks_map: dict[str, List[Mask]] = {}
+        self.active_mask_index: Optional[int] = None
+        self.mask_var = ctk.StringVar(value="无遮罩")
+        self._loading_mask = False
         self.drag_start: Optional[Tuple[int, int]] = None
         self.drag_rect: Optional[int] = None
         self.preview_index: Optional[int] = None
@@ -260,12 +264,17 @@ class SubtitleBlurApp(ctk.CTk):
 
         preview_actions = ctk.CTkFrame(preview_frame, fg_color="transparent")
         preview_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
-        preview_actions.grid_columnconfigure(1, weight=1)
-        self.roi_label = ctk.CTkLabel(preview_actions, text="区域: 未设置", text_color="#8a9ab0")
-        self.roi_label.grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(preview_actions, text="清除区域", width=110, command=self._clear_roi).grid(
-            row=0, column=1, sticky="e", padx=(8, 0)
+        preview_actions.grid_columnconfigure(0, weight=1)
+        self.roi_label = ctk.CTkLabel(
+            preview_actions, text="在画面中拖拽框选遮罩区域", text_color="#8a9ab0", anchor="w"
         )
+        self.roi_label.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(preview_actions, text="删除关键帧", width=96, command=self._delete_current_keyframe).grid(
+            row=0, column=1, sticky="e", padx=(8, 4)
+        )
+        ctk.CTkButton(
+            preview_actions, text="转为静态", width=84, command=self._make_mask_static
+        ).grid(row=0, column=2, sticky="e")
 
         # ===== 设置面板 =====
         settings = ctk.CTkScrollableFrame(panel_preview, corner_radius=12, height=300)
@@ -283,18 +292,32 @@ class SubtitleBlurApp(ctk.CTk):
             ).grid(row=0, column=0, sticky="w")
             ctk.CTkFrame(sf, height=1, fg_color="#1e3a5f").grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        # ── 模糊设置 ──
-        _section("▸  模糊设置", 0)
-        ctk.CTkLabel(settings, text="算法").grid(row=1, column=0, sticky="w", padx=14, pady=(6, 4))
+        # ── 遮罩设置 ──
+        _section("▸  遮罩设置", 0)
+        ctk.CTkLabel(settings, text="遮罩").grid(row=1, column=0, sticky="w", padx=14, pady=(6, 4))
+        mask_row = ctk.CTkFrame(settings, fg_color="transparent")
+        mask_row.grid(row=1, column=1, sticky="ew", padx=12, pady=(6, 4))
+        mask_row.grid_columnconfigure(0, weight=1)
+        self.mask_menu = ctk.CTkOptionMenu(
+            mask_row, variable=self.mask_var, values=["无遮罩"], command=self._on_mask_select
+        )
+        self.mask_menu.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ctk.CTkButton(mask_row, text="＋", width=34, command=self._add_mask).grid(row=0, column=1, padx=(0, 4))
+        ctk.CTkButton(
+            mask_row, text="－", width=34, command=self._delete_mask,
+            fg_color="#7f1d1d", hover_color="#991b1b",
+        ).grid(row=0, column=2)
+
+        ctk.CTkLabel(settings, text="算法").grid(row=2, column=0, sticky="w", padx=14, pady=(6, 4))
         ctk.CTkOptionMenu(
             settings,
             variable=self.blur_method_var,
             values=[label for label, _ in self.blur_options],
             command=self._on_blur_method_change,
-        ).grid(row=1, column=1, sticky="ew", padx=12, pady=(6, 4))
+        ).grid(row=2, column=1, sticky="ew", padx=12, pady=(6, 4))
 
         strength_row = ctk.CTkFrame(settings, fg_color="transparent")
-        strength_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 6))
+        strength_row.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 4))
         strength_row.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(strength_row, text="强度").grid(row=0, column=0, sticky="w", padx=(2, 8))
         ctk.CTkSlider(
@@ -303,21 +326,26 @@ class SubtitleBlurApp(ctk.CTk):
         ctk.CTkLabel(strength_row, textvariable=self.blur_strength, width=34, anchor="e").grid(
             row=0, column=2, padx=(6, 0)
         )
+        ctk.CTkLabel(
+            settings,
+            text="提示：先「＋」添加遮罩再框选；在不同帧重新框选即生成移动关键帧以跟随水印。",
+            text_color="#5c6b82", font=ctk.CTkFont(size=11), wraplength=360, justify="left",
+        ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
 
         # ── 编码设置 ──
-        _section("▸  编码设置", 3)
-        ctk.CTkLabel(settings, text="编码器").grid(row=4, column=0, sticky="w", padx=14, pady=(6, 6))
+        _section("▸  编码设置", 5)
+        ctk.CTkLabel(settings, text="编码器").grid(row=6, column=0, sticky="w", padx=14, pady=(6, 6))
         ctk.CTkOptionMenu(
             settings,
             variable=self.encoder_var,
             values=[label for label, _ in self.encoder_options],
             command=self._on_encoder_change,
-        ).grid(row=4, column=1, sticky="ew", padx=12, pady=(6, 6))
+        ).grid(row=6, column=1, sticky="ew", padx=12, pady=(6, 6))
 
         # ── 处理选项 ──
-        _section("▸  处理选项", 5)
+        _section("▸  处理选项", 7)
         opts = ctk.CTkFrame(settings, fg_color="transparent")
-        opts.grid(row=6, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
+        opts.grid(row=8, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
         opts.grid_columnconfigure(0, weight=1)
         ctk.CTkCheckBox(
             opts, text="去除音轨", variable=self.remove_audio, corner_radius=8, command=self._on_option_toggle
@@ -330,18 +358,18 @@ class SubtitleBlurApp(ctk.CTk):
         ).grid(row=2, column=0, sticky="w", pady=3)
 
         # ── 路径与导出 ──
-        _section("▸  路径与导出", 7)
-        ctk.CTkLabel(settings, text="ffmpeg").grid(row=8, column=0, sticky="w", padx=14, pady=(6, 2))
+        _section("▸  路径与导出", 9)
+        ctk.CTkLabel(settings, text="ffmpeg").grid(row=10, column=0, sticky="w", padx=14, pady=(6, 2))
         path_frame = ctk.CTkFrame(settings, fg_color="transparent")
-        path_frame.grid(row=8, column=1, sticky="ew", padx=12, pady=(6, 2))
+        path_frame.grid(row=10, column=1, sticky="ew", padx=12, pady=(6, 2))
         path_frame.grid_columnconfigure(0, weight=1)
         self.ffmpeg_entry = ctk.CTkEntry(path_frame, placeholder_text="自动/手动选择", corner_radius=8)
         self.ffmpeg_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ctk.CTkButton(path_frame, text="浏览", width=72, command=self.choose_ffmpeg).grid(row=0, column=1)
 
-        ctk.CTkLabel(settings, text="导出目录").grid(row=9, column=0, sticky="w", padx=14, pady=(6, 6))
+        ctk.CTkLabel(settings, text="导出目录").grid(row=11, column=0, sticky="w", padx=14, pady=(6, 6))
         out_frame = ctk.CTkFrame(settings, fg_color="transparent")
-        out_frame.grid(row=9, column=1, sticky="ew", padx=12, pady=(6, 6))
+        out_frame.grid(row=11, column=1, sticky="ew", padx=12, pady=(6, 6))
         out_frame.grid_columnconfigure(0, weight=1)
         self.output_entry = ctk.CTkEntry(out_frame, placeholder_text="默认：源文件目录", corner_radius=8)
         self.output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
@@ -349,7 +377,7 @@ class SubtitleBlurApp(ctk.CTk):
 
         # ── 动作按钮 ──
         action_row = ctk.CTkFrame(settings, fg_color="transparent")
-        action_row.grid(row=10, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 14))
+        action_row.grid(row=12, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 14))
         action_row.grid_columnconfigure((0, 1), weight=1, uniform="action")
         ctk.CTkButton(
             action_row, text="开始处理", command=self.start_processing, height=42,
@@ -382,7 +410,8 @@ class SubtitleBlurApp(ctk.CTk):
 
     def clear_list(self) -> None:
         self.video_paths.clear()
-        self.roi_map.clear()
+        self.masks_map.clear()
+        self.active_mask_index = None
         self._refresh_list()
         self._update_preview_selector()
         self._clear_preview_canvas()
@@ -420,7 +449,7 @@ class SubtitleBlurApp(ctk.CTk):
         if path in self.video_paths:
             idx = self.video_paths.index(path)
             self.video_paths.pop(idx)
-            self.roi_map.pop(path, None)
+            self.masks_map.pop(path, None)
             self.processing_paths.discard(path)
             self._refresh_list()
             self._update_preview_selector()
@@ -458,12 +487,12 @@ class SubtitleBlurApp(ctk.CTk):
             self.preview_menu.configure(values=["请选择视频"])
             self.preview_var.set("请选择视频")
             self.preview_index = None
-            self.roi = None
+            self.active_mask_index = None
             if self.cap:
                 self.cap.release()
                 self.cap = None
             self.total_frames = 0
-            self._update_roi_label()
+            self._update_mask_selector()
             self._clear_preview_canvas()
             return
         self.preview_menu.configure(values=values)
@@ -547,8 +576,7 @@ class SubtitleBlurApp(ctk.CTk):
         )
         self.timeline_slider.configure(from_=0, to=max(self.total_frames - 1, 1))
         self.current_frame_idx = 0
-        self._load_roi_for_path(path)
-        self._update_roi_label()
+        self._load_masks_for_path(path)
         self._seeking_active = False
         self._last_seek_frame = None
         self._show_frame(0)
@@ -618,9 +646,9 @@ class SubtitleBlurApp(ctk.CTk):
         orig_h, orig_w, _ = frame.shape
         self.frame_size = (orig_w, orig_h)
         disp_w, disp_h, scale, off_x, off_y = self._fit_to_preview(orig_w, orig_h)
-        apply_blur = bool(self.roi) and not self._seeking_active
+        apply_blur = bool(self._current_masks()) and not self._seeking_active
         if apply_blur:
-            frame = self._apply_preview_blur(frame)
+            frame = self._apply_preview_masks(frame, frame_idx)
         if (orig_w, orig_h) != (disp_w, disp_h):
             frame = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -637,9 +665,7 @@ class SubtitleBlurApp(ctk.CTk):
         self.preview_canvas.delete("roi")
         self.preview_scale = scale
         self.preview_offset = (off_x, off_y)
-        if self.roi:
-            rx1, ry1, rx2, ry2 = self._video_to_display_rect(self.roi)
-            self.preview_canvas.create_rectangle(rx1, ry1, rx2, ry2, outline="#e74c3c", width=2, tags="roi")
+        self._draw_mask_rects(frame_idx)
         self.current_frame_idx = frame_idx
         if update_slider:
             self._ignore_seek_event = True
@@ -701,13 +727,146 @@ class SubtitleBlurApp(ctk.CTk):
             self._last_seek_frame = None
             self._request_preview_frame(target, use_async=True, update_slider=True)
 
-    def _clear_roi(self) -> None:
-        self.roi = None
-        self._save_roi_for_current()
-        self._update_roi_label()
+    # ------------------------------------------------------------------ 遮罩管理
+    def _current_masks(self) -> List[Mask]:
+        if self.preview_index is None or not (0 <= self.preview_index < len(self.video_paths)):
+            return []
+        path = self.video_paths[self.preview_index]
+        return self.masks_map.setdefault(path, [])
+
+    def _active_mask(self) -> Optional[Mask]:
+        masks = self._current_masks()
+        if self.active_mask_index is not None and 0 <= self.active_mask_index < len(masks):
+            return masks[self.active_mask_index]
+        return None
+
+    def _add_mask(self) -> None:
+        if self.preview_index is None:
+            self._set_status("请先选择一个视频")
+            return
+        masks = self._current_masks()
+        mask = Mask(
+            method=self._normalize_blur_method(self.blur_method_var.get()),
+            strength=max(int(self.blur_strength.get()), 5),
+        )
+        masks.append(mask)
+        self.active_mask_index = len(masks) - 1
+        self._update_mask_selector()
+        self._log(f"已添加遮罩 {self.active_mask_index + 1}，请在画面中框选区域")
         self._show_frame(self.current_frame_idx)
-        self._log("已清除处理区域")
-        self._auto_save_config()
+
+    def _delete_mask(self) -> None:
+        masks = self._current_masks()
+        if not masks or self.active_mask_index is None:
+            self._set_status("没有可删除的遮罩")
+            return
+        removed = self.active_mask_index + 1
+        masks.pop(self.active_mask_index)
+        self.active_mask_index = (len(masks) - 1) if masks else None
+        self._update_mask_selector()
+        self._log(f"已删除遮罩 {removed}")
+        self._show_frame(self.current_frame_idx)
+
+    def _delete_current_keyframe(self) -> None:
+        mask = self._active_mask()
+        if not mask:
+            self._set_status("请先选择遮罩")
+            return
+        if mask.remove_keyframe(self.current_frame_idx):
+            self._log(f"已删除遮罩 {self.active_mask_index + 1} 在第 {self.current_frame_idx} 帧的关键帧")
+        else:
+            self._set_status("当前帧没有关键帧")
+        self._update_mask_label()
+        self._show_frame(self.current_frame_idx)
+
+    def _make_mask_static(self) -> None:
+        mask = self._active_mask()
+        if not mask or not mask.keyframes:
+            self._set_status("请先选择带关键帧的遮罩")
+            return
+        rect = mask.rect_at(self.current_frame_idx)
+        mask.make_static(rect)
+        self._log(f"遮罩 {self.active_mask_index + 1} 已转为静态")
+        self._update_mask_label()
+        self._show_frame(self.current_frame_idx)
+
+    def _on_mask_select(self, value: str) -> None:
+        masks = self._current_masks()
+        try:
+            idx = int(value.split()[-1]) - 1
+        except (ValueError, IndexError):
+            return
+        if 0 <= idx < len(masks):
+            self.active_mask_index = idx
+            self._load_active_mask_controls()
+            self._update_mask_label()
+            self._show_frame(self.current_frame_idx)
+
+    def _load_masks_for_path(self, path: str) -> None:
+        masks = self.masks_map.setdefault(path, [])
+        self.active_mask_index = 0 if masks else None
+        self._update_mask_selector()
+
+    def _load_active_mask_controls(self) -> None:
+        """把当前遮罩的算法/强度回填到控件（避免触发写回）。"""
+        mask = self._active_mask()
+        if not mask:
+            return
+        self._loading_mask = True
+        try:
+            self.blur_method_var.set(self._blur_label_from_value(mask.method))
+            self.blur_strength.set(int(mask.strength))
+        finally:
+            self._loading_mask = False
+
+    def _update_mask_selector(self) -> None:
+        if not hasattr(self, "mask_menu"):
+            return
+        masks = self._current_masks()
+        values = [f"遮罩 {i + 1}" for i in range(len(masks))] or ["无遮罩"]
+        self.mask_menu.configure(values=values)
+        if masks and self.active_mask_index is not None:
+            self.active_mask_index = min(self.active_mask_index, len(masks) - 1)
+            self.mask_var.set(values[self.active_mask_index])
+            self._load_active_mask_controls()
+        else:
+            self.active_mask_index = None
+            self.mask_var.set("无遮罩")
+        self._update_mask_label()
+
+    def _update_mask_label(self) -> None:
+        mask = self._active_mask()
+        if not mask:
+            self.roi_label.configure(text="在画面中拖拽框选遮罩区域（先「＋」添加遮罩）")
+            return
+        rect = mask.rect_at(self.current_frame_idx)
+        if not rect:
+            self.roi_label.configure(text=f"遮罩 {self.active_mask_index + 1}: 未框选，拖拽以设置")
+            return
+        x, y, w, h = rect
+        motion = f"移动·{len(mask.keyframes)}关键帧" if mask.is_moving() else "静态"
+        self.roi_label.configure(
+            text=f"遮罩 {self.active_mask_index + 1} [{motion}]  x={x} y={y} w={w} h={h}"
+        )
+
+    def _draw_mask_rects(self, frame_idx: int) -> None:
+        for i, mask in enumerate(self._current_masks()):
+            rect = mask.rect_at(frame_idx)
+            if not rect:
+                continue
+            rx1, ry1, rx2, ry2 = self._video_to_display_rect(rect)
+            if i == self.active_mask_index:
+                self.preview_canvas.create_rectangle(
+                    rx1, ry1, rx2, ry2, outline="#e74c3c", width=2, tags="roi"
+                )
+            else:
+                self.preview_canvas.create_rectangle(
+                    rx1, ry1, rx2, ry2, outline="#f59e0b", width=1, dash=(4, 3), tags="roi"
+                )
+            self.preview_canvas.create_text(
+                rx1 + 2, ry1 + 8, anchor="w", text=str(i + 1),
+                fill="#ffffff", font=("Arial", 10, "bold"), tags="roi",
+            )
 
     def _on_canvas_press(self, event: tk.Event) -> None:
         if not self.cap:
@@ -733,15 +892,24 @@ class SubtitleBlurApp(ctk.CTk):
             self.preview_canvas.delete(self.drag_rect)
             self.drag_rect = None
         self.drag_start = None
-        roi = self._display_to_video_rect(x0, y0, x1, y1)
-        if roi:
-            self.roi = roi
-            self._save_roi_for_current()
-            self._log(f"已设置区域: x={roi[0]}, y={roi[1]}, w={roi[2]}, h={roi[3]}")
-            self._update_roi_label()
-        else:
-            self.roi = None
-            self._log("区域过小或无效，已清除")
+        rect = self._display_to_video_rect(x0, y0, x1, y1)
+        if not rect:
+            self._log("区域过小或无效")
+            self._show_frame(self.current_frame_idx)
+            return
+        mask = self._active_mask()
+        if mask is None:
+            # 尚无遮罩时，框选自动创建一个。
+            self._add_mask()
+            mask = self._active_mask()
+        if mask is not None:
+            mask.set_keyframe(self.current_frame_idx, rect)
+            kf = "关键帧" if mask.is_moving() else "区域"
+            self._log(
+                f"遮罩 {self.active_mask_index + 1} 第 {self.current_frame_idx} 帧{kf}: "
+                f"x={rect[0]}, y={rect[1]}, w={rect[2]}, h={rect[3]}"
+            )
+            self._update_mask_label()
         self._show_frame(self.current_frame_idx)
 
     def _display_to_video_rect(self, x0: int, y0: int, x1: int, y1: int) -> Optional[Tuple[int, int, int, int]]:
@@ -774,14 +942,6 @@ class SubtitleBlurApp(ctk.CTk):
         rx1 = int((x + w) * sx + ox)
         ry1 = int((y + h) * sx + oy)
         return rx0, ry0, rx1, ry1
-
-    def _update_roi_label(self) -> None:
-        if self.roi:
-            x, y, w, h = self.roi
-            text = f"区域: x={x}, y={y}, w={w}, h={h}"
-        else:
-            text = "区域: 未设置"
-        self.roi_label.configure(text=text)
 
     def _clear_preview_canvas(self) -> None:
         if not hasattr(self, "preview_canvas"):
@@ -822,15 +982,9 @@ class SubtitleBlurApp(ctk.CTk):
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             frame.bind(seq, _on_scroll, add="+")
 
-    def _apply_preview_blur(self, frame) -> "cv2.Mat":
-        if not self.roi or frame is None:
-            return frame
-        method = self._normalize_blur_method(self.blur_method_var.get())
-        # 时域擦除依赖多帧背景，单帧预览退化为空间修复效果。
-        if method == "inpaint_temporal":
-            method = "inpaint"
-        strength = max(int(self.blur_strength.get()), 5)
-        return bc.apply_roi_blur(frame, self.roi, method, strength)
+    def _apply_preview_masks(self, frame, frame_idx: int) -> "cv2.Mat":
+        # 预览无多帧背景，时域擦除在 apply_masks 内退化为空间 inpaint。
+        return bc.apply_masks(frame, self._current_masks(), frame_idx, None)
 
     def _on_window_resize(self, event: tk.Event) -> None:
         if event.widget is not self:
@@ -856,29 +1010,23 @@ class SubtitleBlurApp(ctk.CTk):
         else:
             self._clear_preview_canvas()
 
-    def _save_roi_for_current(self) -> None:
-        if self.preview_index is None or not (0 <= self.preview_index < len(self.video_paths)):
-            return
-        path = self.video_paths[self.preview_index]
-        if self.roi:
-            self.roi_map[path] = self.roi
-        elif path in self.roi_map:
-            self.roi_map.pop(path, None)
-
-    def _load_roi_for_path(self, path: str) -> None:
-        saved = self.roi_map.get(path)
-        if saved and len(saved) == 4:
-            self.roi = tuple(int(v) for v in saved)  # type: ignore
-        else:
-            self.roi = None
-
     def _on_blur_method_change(self, _: str) -> None:
+        # 写回当前遮罩（选择遮罩时的回填不应触发写回）。
+        if not self._loading_mask:
+            mask = self._active_mask()
+            if mask:
+                mask.method = self._normalize_blur_method(self.blur_method_var.get())
+                self._update_mask_label()
         if self.cap:
             self._show_frame(self.current_frame_idx)
         self._auto_save_config()
 
     def _on_blur_strength_change(self, value: float) -> None:
         self.blur_strength.set(int(value))
+        if not self._loading_mask:
+            mask = self._active_mask()
+            if mask:
+                mask.strength = max(int(value), 5)
         if self.cap:
             if self._strength_job:
                 self.after_cancel(self._strength_job)
@@ -964,8 +1112,6 @@ class SubtitleBlurApp(ctk.CTk):
         self._ensure_hwaccel_detected()
         ffmpeg_exec = self._resolve_ffmpeg_path()
         encoder_pref = self._normalize_encoder(self.encoder_var.get())
-        method = self._normalize_blur_method(self.blur_method_var.get())
-        strength = int(self.blur_strength.get())
         crop_enabled = bool(self.crop_9x16.get())
         remove_audio = bool(self.remove_audio.get())
         remove_after = bool(self.remove_after.get())
@@ -973,7 +1119,7 @@ class SubtitleBlurApp(ctk.CTk):
         self._set_status("处理中...")
         t = threading.Thread(
             target=self._process_worker,
-            args=(ffmpeg_exec, encoder_pref, method, strength, crop_enabled, remove_audio, remove_after),
+            args=(ffmpeg_exec, encoder_pref, crop_enabled, remove_audio, remove_after),
             daemon=True,
         )
         t.start()
@@ -1028,8 +1174,6 @@ class SubtitleBlurApp(ctk.CTk):
         self,
         ffmpeg_exec: Optional[str],
         encoder_pref: str,
-        method: str,
-        strength: int,
         crop_enabled: bool,
         remove_audio: bool,
         remove_after: bool,
@@ -1046,12 +1190,12 @@ class SubtitleBlurApp(ctk.CTk):
             idx, path = idx_path
             self._set_processing_state(path, True)
             try:
-                roi = self.roi_map.get(path, self.roi)
-                roi_text = f"区域 x={roi[0]}, y={roi[1]}, w={roi[2]}, h={roi[3]}" if roi else "区域未设置"
+                masks = list(self.masks_map.get(path, []))
+                mask_text = f"{len(masks)} 个遮罩" if masks else "无遮罩"
                 self._log(
-                    f"[{idx}/{total}] 开始 {os.path.basename(path)} ({roi_text} | {encoder_label})"
+                    f"[{idx}/{total}] 开始 {os.path.basename(path)} ({mask_text} | {encoder_label})"
                 )
-                out_path = self._process_single_video(path, roi, method, strength, crop_enabled, remove_audio)
+                out_path = self._process_single_video(path, masks, crop_enabled, remove_audio)
                 return path, out_path
             finally:
                 self._set_processing_state(path, False)
@@ -1090,9 +1234,7 @@ class SubtitleBlurApp(ctk.CTk):
     def _process_single_video(
         self,
         path: str,
-        roi: Optional[Tuple[int, int, int, int]],
-        method: str,
-        strength: int,
+        masks: List[Mask],
         crop_enabled: bool,
         remove_audio: bool,
     ) -> str:
@@ -1106,9 +1248,7 @@ class SubtitleBlurApp(ctk.CTk):
         return self._build_exporter().export(
             src_path=path,
             out_path=out_path,
-            roi=roi,
-            method=method,
-            strength=strength,
+            masks=masks,
             crop_enabled=crop_enabled,
             remove_audio=remove_audio,
             encoder=self.current_encoder,
@@ -1116,11 +1256,12 @@ class SubtitleBlurApp(ctk.CTk):
         )
 
     def preview_settings(self) -> None:
+        total_masks = sum(len(m) for m in self.masks_map.values())
+        moving = sum(1 for masks in self.masks_map.values() for m in masks if m.is_moving())
         info = (
-            f"模糊: {self.blur_method_var.get()} 强度: {self.blur_strength.get()} | "
-            f"编码器: {self.encoder_var.get()} | 去音轨: {self.remove_audio.get()} | "
-            f"裁剪9:16: {self.crop_9x16.get()} | 导出后移除: {self.remove_after.get()} | "
-            f"文件数: {len(self.video_paths)} | 并行数: {self.worker_count}"
+            f"遮罩总数: {total_masks}（移动 {moving}） | 编码器: {self.encoder_var.get()} | "
+            f"去音轨: {self.remove_audio.get()} | 裁剪9:16: {self.crop_9x16.get()} | "
+            f"导出后移除: {self.remove_after.get()} | 文件数: {len(self.video_paths)} | 并行数: {self.worker_count}"
         )
         self._log(info)
         self._set_status("设置预览完成")

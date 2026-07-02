@@ -160,12 +160,12 @@ def solid_bar(region, strength: int):
     return np.full_like(region, int(region.mean()))
 
 
-def composite_background(frame, background_roi, roi, strength: int):
+def composite_background(frame, background, roi, strength: int):
     """时域擦除：把 ROI 内的字幕像素替换为干净背景，非字幕像素原样保留。
 
-    background_roi 为提前算好的、与夹取后 ROI 等尺寸的干净背景图。
+    background 为与 frame 同尺寸的整帧干净背景（多个/移动遮罩可共用）。
     """
-    if frame is None or background_roi is None or not roi:
+    if frame is None or background is None or not roi:
         return frame
     h, w = frame.shape[:2]
     box = clamp_roi(roi, w, h)
@@ -173,7 +173,7 @@ def composite_background(frame, background_roi, roi, strength: int):
         return frame
     x, y, end_x, end_y = box
     region = frame[y:end_y, x:end_x]
-    bg = background_roi[: region.shape[0], : region.shape[1]]
+    bg = background[y:end_y, x:end_x]
     if bg.shape[:2] != region.shape[:2]:
         return frame
     mask = detect_subtitle_mask(region, strength)
@@ -183,6 +183,26 @@ def composite_background(frame, background_roi, roi, strength: int):
     alpha = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), 1.5)
     alpha = alpha[:, :, None] if region.ndim == 3 else alpha
     region[:] = (region.astype(np.float32) * (1.0 - alpha) + bg.astype(np.float32) * alpha).astype(np.uint8)
+    return frame
+
+
+def apply_masks(frame, masks, frame_index: int, temporal_bg=None):
+    """按当前帧号应用一组遮罩（各自的位置、算法、强度）。
+
+    masks 中每个对象需提供 .method / .strength 属性与 .rect_at(frame_index) 方法。
+    移动遮罩由 rect_at 完成关键帧插值，从而跟随浮动水印。
+    """
+    if frame is None or not masks:
+        return frame
+    for mask in masks:
+        rect = mask.rect_at(frame_index)
+        if not rect:
+            continue
+        if mask.method == "inpaint_temporal" and temporal_bg is not None:
+            composite_background(frame, temporal_bg, rect, mask.strength)
+        else:
+            method = "inpaint" if mask.method == "inpaint_temporal" else mask.method
+            apply_roi_blur(frame, rect, method, mask.strength)
     return frame
 
 

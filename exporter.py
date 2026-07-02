@@ -17,7 +17,6 @@ import numpy as np
 import blur_core as bc
 import media_tools as mt
 
-Roi = Optional[Tuple[int, int, int, int]]
 LogFn = Callable[[str], None]
 
 
@@ -41,15 +40,17 @@ class VideoExporter:
         self,
         src_path: str,
         out_path: str,
-        roi: Roi,
-        method: str,
-        strength: int,
+        masks: list,
         crop_enabled: bool,
         remove_audio: bool,
         encoder: str,
         preserve_bitrate: bool = True,
     ) -> str:
-        """导出单个视频，返回输出路径。硬件编码失败时自动回退 libx264。"""
+        """导出单个视频，返回输出路径。硬件编码失败时自动回退 libx264。
+
+        masks 为该视频的遮罩列表（可为空），每个遮罩自带位置(可含关键帧运动)、
+        算法与强度。
+        """
         bitrate = None
         if preserve_bitrate:
             bitrate = mt.probe_video_bitrate(self.ffmpeg_exec, src_path)
@@ -67,8 +68,7 @@ class VideoExporter:
         for enc in attempts:
             try:
                 return self._run_pipeline(
-                    src_path, out_path, roi, method, strength,
-                    crop_enabled, remove_audio, enc, bitrate,
+                    src_path, out_path, masks, crop_enabled, remove_audio, enc, bitrate,
                 )
             except Exception as exc:
                 last_error = exc
@@ -83,9 +83,7 @@ class VideoExporter:
         self,
         src_path: str,
         out_path: str,
-        roi: Roi,
-        method: str,
-        strength: int,
+        masks: list,
         crop_enabled: bool,
         remove_audio: bool,
         encoder: str,
@@ -106,12 +104,12 @@ class VideoExporter:
             out_w = crop_box[2] if crop_box else width
             out_h = crop_box[3] if crop_box else height
 
-            # 时域擦除：先采样若干帧估计干净背景，再逐帧只替换字幕像素。
-            background_roi = None
-            if method == "inpaint_temporal" and roi:
-                background_roi = self._build_temporal_background(cap, roi, width, height, total)
+            # 时域擦除：任一遮罩使用时域模式时，采样多帧估计整帧干净背景（供各遮罩共用）。
+            temporal_bg = None
+            if any(getattr(m, "method", "") == "inpaint_temporal" for m in masks):
+                temporal_bg = self._build_temporal_background(cap, total)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                if background_roi is None:
+                if temporal_bg is None:
                     self._log(f"{os.path.basename(src_path)} 时域背景采样不足，退化为空间修复")
 
             proc, using_hw = self._start_ffmpeg_writer(
@@ -122,7 +120,7 @@ class VideoExporter:
                 writer = self._open_cv_writer(out_path, fps, out_w, out_h)
 
             self._pump_frames(
-                cap, proc, writer, roi, method, strength, crop_box, total, src_path, background_roi
+                cap, proc, writer, masks, crop_box, total, src_path, temporal_bg
             )
 
             if proc is not None:
@@ -137,12 +135,10 @@ class VideoExporter:
         self._log(f"{os.path.basename(src_path)} {'硬件' if using_hw else '软件'}编码完成")
         return out_path
 
-    def _build_temporal_background(self, cap, roi, width, height, total):
-        """采样多帧，取中值作为 ROI 区域的干净背景（字幕多为瞬时/半透明覆盖时有效）。"""
-        box = bc.clamp_roi(roi, width, height)
-        if box is None or total <= 0:
+    def _build_temporal_background(self, cap, total):
+        """采样多帧取中值作为整帧干净背景（字幕/水印多为瞬时或半透明覆盖时有效）。"""
+        if total <= 0:
             return None
-        x, y, end_x, end_y = box
         sample_count = min(21, total)
         indexes = np.linspace(0, total - 1, sample_count).astype(int)
         samples = []
@@ -150,13 +146,13 @@ class VideoExporter:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
             ok, frame = cap.read()
             if ok and frame is not None:
-                samples.append(frame[y:end_y, x:end_x].copy())
+                samples.append(frame.copy())
         if len(samples) < 3:
             return None
         return np.median(np.stack(samples), axis=0).astype(np.uint8)
 
     def _pump_frames(
-        self, cap, proc, writer, roi, method, strength, crop_box, total, src_path, background_roi=None
+        self, cap, proc, writer, masks, crop_box, total, src_path, temporal_bg=None
     ) -> None:
         frame_idx = 0
         last_log = time.time()
@@ -164,10 +160,7 @@ class VideoExporter:
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-            if background_roi is not None:
-                frame = bc.composite_background(frame, background_roi, roi, strength)
-            else:
-                frame = bc.apply_roi_blur(frame, roi, method, strength)
+            frame = bc.apply_masks(frame, masks, frame_idx, temporal_bg)
             if crop_box:
                 x0, y0, cw, ch = crop_box
                 frame = frame[y0:y0 + ch, x0:x0 + cw]
