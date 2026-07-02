@@ -80,6 +80,10 @@ class SubtitleBlurApp(ctk.CTk):
             ("强像素化", "pixelate_strong"),
             ("双重模糊", "double"),
             ("像素化+高斯", "pixelate_gaussian"),
+            ("毛玻璃", "frosted"),
+            ("纯色条", "solid"),
+            ("字幕擦除(inpaint)", "inpaint"),
+            ("字幕擦除(时域)", "inpaint_temporal"),
         ]
         self.blur_method_var = ctk.StringVar(value=self.blur_options[0][0])
         self.blur_strength = ctk.IntVar(value=80)
@@ -821,19 +825,12 @@ class SubtitleBlurApp(ctk.CTk):
     def _apply_preview_blur(self, frame) -> "cv2.Mat":
         if not self.roi or frame is None:
             return frame
-        h, w = frame.shape[:2]
-        x, y, rw, rh = self.roi
-        x = max(0, min(x, w - 1))
-        y = max(0, min(y, h - 1))
-        end_x = min(x + rw, w)
-        end_y = min(y + rh, h)
-        if end_x <= x or end_y <= y:
-            return frame
-        target = frame[y:end_y, x:end_x]
         method = self._normalize_blur_method(self.blur_method_var.get())
+        # 时域擦除依赖多帧背景，单帧预览退化为空间修复效果。
+        if method == "inpaint_temporal":
+            method = "inpaint"
         strength = max(int(self.blur_strength.get()), 5)
-        bc.apply_blur_to_target(target, method, strength)
-        return frame
+        return bc.apply_roi_blur(frame, self.roi, method, strength)
 
     def _on_window_resize(self, event: tk.Event) -> None:
         if event.widget is not self:

@@ -12,6 +12,7 @@ import time
 from typing import Callable, List, Optional, Tuple
 
 import cv2
+import numpy as np
 
 import blur_core as bc
 import media_tools as mt
@@ -105,6 +106,14 @@ class VideoExporter:
             out_w = crop_box[2] if crop_box else width
             out_h = crop_box[3] if crop_box else height
 
+            # 时域擦除：先采样若干帧估计干净背景，再逐帧只替换字幕像素。
+            background_roi = None
+            if method == "inpaint_temporal" and roi:
+                background_roi = self._build_temporal_background(cap, roi, width, height, total)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                if background_roi is None:
+                    self._log(f"{os.path.basename(src_path)} 时域背景采样不足，退化为空间修复")
+
             proc, using_hw = self._start_ffmpeg_writer(
                 out_path, out_w, out_h, fps, encoder, src_path, remove_audio, bitrate
             )
@@ -112,7 +121,9 @@ class VideoExporter:
             if proc is None:
                 writer = self._open_cv_writer(out_path, fps, out_w, out_h)
 
-            self._pump_frames(cap, proc, writer, roi, method, strength, crop_box, total, src_path)
+            self._pump_frames(
+                cap, proc, writer, roi, method, strength, crop_box, total, src_path, background_roi
+            )
 
             if proc is not None:
                 self._finish_ffmpeg(proc, using_hw)
@@ -126,14 +137,37 @@ class VideoExporter:
         self._log(f"{os.path.basename(src_path)} {'硬件' if using_hw else '软件'}编码完成")
         return out_path
 
-    def _pump_frames(self, cap, proc, writer, roi, method, strength, crop_box, total, src_path) -> None:
+    def _build_temporal_background(self, cap, roi, width, height, total):
+        """采样多帧，取中值作为 ROI 区域的干净背景（字幕多为瞬时/半透明覆盖时有效）。"""
+        box = bc.clamp_roi(roi, width, height)
+        if box is None or total <= 0:
+            return None
+        x, y, end_x, end_y = box
+        sample_count = min(21, total)
+        indexes = np.linspace(0, total - 1, sample_count).astype(int)
+        samples = []
+        for idx in indexes:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                samples.append(frame[y:end_y, x:end_x].copy())
+        if len(samples) < 3:
+            return None
+        return np.median(np.stack(samples), axis=0).astype(np.uint8)
+
+    def _pump_frames(
+        self, cap, proc, writer, roi, method, strength, crop_box, total, src_path, background_roi=None
+    ) -> None:
         frame_idx = 0
         last_log = time.time()
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-            frame = bc.apply_roi_blur(frame, roi, method, strength)
+            if background_roi is not None:
+                frame = bc.composite_background(frame, background_roi, roi, strength)
+            else:
+                frame = bc.apply_roi_blur(frame, roi, method, strength)
             if crop_box:
                 x0, y0, cw, ch = crop_box
                 frame = frame[y0:y0 + ch, x0:x0 + cw]
