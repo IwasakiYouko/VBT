@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 import blur_core as bc
+import ffmpeg_pipeline as fp
 import media_tools as mt
 
 LogFn = Callable[[str], None]
@@ -59,6 +60,16 @@ class VideoExporter:
             else:
                 self._log(f"{os.path.basename(src_path)} 无法读取源码率，改用质量优先模式")
 
+        # 优先尝试融合式 GPU 管线（静态矩形模糊/马赛克遮罩），失败则回退逐帧处理。
+        if self.ffmpeg_exec and fp.masks_expressible(masks):
+            try:
+                return self._run_ffmpeg_pipeline(
+                    src_path, out_path, masks, crop_enabled, remove_audio, encoder, bitrate
+                )
+            except Exception as exc:
+                self._log(f"{os.path.basename(src_path)} GPU 融合管线不可用({exc})，改用逐帧处理")
+                self._safe_remove(out_path)
+
         attempts = [encoder]
         _, _, first_is_hw = mt.encoder_params(encoder, bitrate)
         if first_is_hw:
@@ -78,8 +89,8 @@ class VideoExporter:
                     self._log(f"{os.path.basename(src_path)} 将回退到软件编码重试")
         raise last_error or RuntimeError("编码未完成")
 
-    # ------------------------------------------------------------- 内部实现
-    def _run_pipeline(
+    # ------------------------------------------------------------- 融合 GPU 管线
+    def _run_ffmpeg_pipeline(
         self,
         src_path: str,
         out_path: str,
@@ -92,6 +103,56 @@ class VideoExporter:
         cap, _ = mt.open_capture(src_path, self.decode_method, self.decode_device)
         if not cap or not cap.isOpened():
             raise RuntimeError("无法打开视频")
+        try:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+        if width <= 0 or height <= 0:
+            raise RuntimeError("无法读取分辨率")
+
+        crop_box = self._compute_crop(width, height) if crop_enabled else None
+        if crop_box is None and (width % 2 or height % 2):
+            crop_box = (0, 0, width - (width % 2), height - (height % 2))
+
+        built = fp.build_filtergraph(masks, width, height, crop_box)
+        if not built:
+            raise RuntimeError("无静态可表达遮罩")
+        filter_complex, final_label = built
+
+        enc, extra, is_hw = mt.encoder_params(encoder, bitrate)
+        hwaccel = self.decode_method if self.decode_method in ("cuda", "d3d11va", "dxva2", "vaapi") else None
+        args = fp.build_command(
+            self.ffmpeg_exec, src_path, out_path, filter_complex, final_label,
+            enc, extra, remove_audio, hwaccel,
+        )
+        proc = subprocess.run(args, capture_output=True, text=True)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            err = (proc.stderr or proc.stdout or "").strip().splitlines()
+            raise RuntimeError(err[-1] if err else "ffmpeg 返回非零")
+        decode = f"{hwaccel} 硬件解码" if hwaccel else "CPU 解码"
+        codec = "NVENC/硬件" if is_hw else "软件"
+        self._log(f"{os.path.basename(src_path)} GPU 融合管线完成（{decode} + {codec}编码，无逐帧回传）")
+        return out_path
+
+    # ------------------------------------------------------------- 逐帧实现
+    def _run_pipeline(
+        self,
+        src_path: str,
+        out_path: str,
+        masks: list,
+        crop_enabled: bool,
+        remove_audio: bool,
+        encoder: str,
+        bitrate: Optional[int],
+    ) -> str:
+        cap, used_hw = mt.open_capture(src_path, self.decode_method, self.decode_device)
+        if not cap or not cap.isOpened():
+            raise RuntimeError("无法打开视频")
+        self._log(
+            f"{os.path.basename(src_path)} 逐帧管线："
+            f"{self.decode_method + ' 硬件解码' if used_hw and self.decode_method else 'CPU 解码'}"
+        )
         try:
             fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)

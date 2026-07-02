@@ -40,6 +40,8 @@ python main.py
 - 输出默认使用 OpenCV 写入 MP4；若本机未安装 `ffmpeg`，导出的视频将没有音频。
 - 导出会通过 `ffprobe` 读取源视频码率，并以目标码率 + maxrate/bufsize 的方式尽量保持原有码率；无法读取时回退到质量优先（CRF/CQ）模式。
 - 充分利用显卡：解码优先走 CUDA / D3D11VA / DXVA2 / VAAPI 硬件加速，模糊在可用时使用 OpenCV CUDA 滤镜，编码优先使用 NVENC / QSV / AMF 硬件编码器。
+- **融合式 GPU 管线**：当一个视频的遮罩都是「静态矩形模糊/马赛克」时，导出会用单条 ffmpeg 命令完成「硬件解码 → 区域滤镜 → NVENC 编码」，不再逐帧回传 Python、也没有进程间 rawvideo 拷贝，CPU 占用大幅下降；音轨直接拷贝不重编码。移动遮罩、inpaint、时域擦除、纯色/中值/毛玻璃仍走逐帧管线（该管线也会尽量使用硬件解码 + NVENC 编码）。日志会标明每个视频实际走了哪条管线、解码/编码是否在 GPU 上。
+- 关于 `cv2.cuda`：官方 `opencv-python` 轮子不含 CUDA，其 GPU 滤镜路径不会生效；如需 OpenCV 侧 GPU 模糊，需要自行编译带 CUDA 的 OpenCV。融合式 GPU 管线不依赖它。
 - 框选区域与模糊设置在同一视频内复用，可在时间轴任意帧预览模糊效果。
 - GUI 会根据当前屏幕 DPI 自动缩放，适配高分屏。
 - 右侧“日志”面板可查看处理进度与 ffmpeg 回退情况。（日志位于列表下方）
@@ -61,7 +63,8 @@ python main.py
 - `main.py`：图形界面与交互逻辑。
 - `app_config.py`：配置文件的读写与旧版本迁移（`AppConfig`）。
 - `media_tools.py`：ffmpeg / ffprobe 探测、硬件解码/编码检测、源码率读取、编码参数生成。
-- `exporter.py`：`VideoExporter` 导出管线（解码 → ROI 模糊 → 可选 9:16 裁剪 → 编码），含硬件→软件编码回退。
+- `exporter.py`：`VideoExporter` 导出管线（融合式 GPU 管线优先，回退逐帧：解码 → 遮罩 → 可选 9:16 裁剪 → 编码），含硬件→软件编码回退。
+- `ffmpeg_pipeline.py`：融合式 GPU 管线的滤镜图/命令生成（静态矩形模糊/马赛克，硬件解码 + NVENC 编码单进程完成）。
 - `masks.py`：遮罩数据模型（`Mask`），支持单视频多遮罩、每遮罩独立算法/强度、关键帧运动（线性插值）与序列化。
 - `blur_core.py`：遮挡/擦除算法实现（模糊、马赛克、毛玻璃、纯色条、羽化软边、字幕检测 + inpaint、时域背景合成、多遮罩按帧应用 `apply_masks`），支持 OpenCV CUDA 加速。
 - `perf_benchmark.py`：模糊算法的 CPU 性能基准脚本。
