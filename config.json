@@ -1,0 +1,10 @@
+{
+  "ffmpeg_path": "D:/Users/Iwasa/Downloads/ffmpeg-master-latest-win64-gpl-shared/bin/ffmpeg.exe",
+  "output_dir": "E:/初始素材/2026.7.1/范佳丞/2-便携药盒thai/2",
+  "remove_audio": true,
+  "crop_9x16": true,
+  "remove_after_export": true,
+  "encoder": "auto",
+  "blur_method": "double",
+  "blur_strength": 120
+}
