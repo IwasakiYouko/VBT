@@ -1,7 +1,5 @@
-import json
 import os
 import concurrent.futures
-import subprocess
 import threading
 import time
 import tkinter as tk
@@ -11,7 +9,11 @@ import cv2
 import customtkinter as ctk
 from PIL import Image, ImageTk
 from customtkinter import filedialog
+
 import blur_core as bc
+import media_tools as mt
+from app_config import AppConfig
+from exporter import VideoExporter
 
 
 class SubtitleBlurApp(ctk.CTk):
@@ -118,7 +120,6 @@ class SubtitleBlurApp(ctk.CTk):
         # 并行数量：最多 CPU 核心数，上限 8
         self.worker_count = max(1, min(os.cpu_count() or 4, 8))
         self.cap_lock = threading.Lock()
-        self._cap_env_lock = threading.Lock()
         self.preview_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="preview")
         self._preview_generation = 0
         self._seek_job: Optional[str] = None
@@ -906,41 +907,8 @@ class SubtitleBlurApp(ctk.CTk):
             return local
         return None
 
-    def _detect_available_encoders(self, ffmpeg_exec: Optional[str] = None, timeout: float = 3.0) -> List[str]:
-        exec_path = ffmpeg_exec or self._resolve_ffmpeg_path()
-        if not exec_path:
-            return []
-        try:
-            proc = subprocess.run(
-                [exec_path, "-hide_banner", "-encoders"],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            output = (proc.stdout or "") + (proc.stderr or "")
-        except Exception:
-            return []
-        found: List[str] = []
-        for code in ("h264_nvenc", "h264_qsv", "h264_amf"):
-            if code in output:
-                found.append(code)
-        return found
-
-    def _detect_working_hw_encoders(
-        self, ffmpeg_exec: str, log_failure: bool = False
-    ) -> Tuple[List[str], List[str]]:
-        advertised = self._detect_available_encoders(ffmpeg_exec)
-        usable: List[str] = []
-        failed: List[str] = []
-        for enc in advertised:
-            if self._encoder_usable(ffmpeg_exec, enc, log_failure=log_failure):
-                usable.append(enc)
-            else:
-                failed.append(enc)
-        return usable, failed
-
     def _probe_encoders_background(self, ffmpeg_exec: str) -> None:
-        usable, _ = self._detect_working_hw_encoders(ffmpeg_exec, log_failure=False)
+        usable, _ = mt.detect_working_hw_encoders(ffmpeg_exec)
         with self._encoder_probe_lock:
             self._encoder_probe_cache[ffmpeg_exec] = usable
             self._encoder_probe_running.discard(ffmpeg_exec)
@@ -963,31 +931,10 @@ class SubtitleBlurApp(ctk.CTk):
         t.start()
 
     def _encoder_usable(self, ffmpeg_exec: str, encoder: str, log_failure: bool = False) -> bool:
-        test_cmd = [
-            ffmpeg_exec, "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=size=128x128:rate=30:duration=0.2",
-            "-frames:v", "1", "-c:v", encoder, "-pix_fmt", "yuv420p", "-f", "null", "-",
-        ]
-        try:
-            proc = subprocess.run(test_cmd, capture_output=True, text=True, timeout=3)
-        except Exception as exc:
-            if log_failure:
-                self._log(f"{encoder} 自检失败: {exc}")
-            return False
-        if proc.returncode == 0:
-            return True
-        if log_failure:
-            err = (proc.stderr or proc.stdout or "").strip().splitlines()
-            if err:
-                self._log(f"{encoder} 自检失败: {err[-1]}")
-        return False
-
-    def _auto_pick_encoder(self, detected: List[str]) -> str:
-        order = ["h264_nvenc", "h264_qsv", "h264_amf"]
-        for code in order:
-            if code in detected:
-                return code
-        return "libx264"
+        ok, err = mt.encoder_usable(ffmpeg_exec, encoder)
+        if not ok and log_failure and err:
+            self._log(f"{encoder} 自检失败: {err}")
+        return ok
 
     def _on_encoder_change(self, _: str) -> None:
         self._auto_save_config()
@@ -1046,7 +993,7 @@ class SubtitleBlurApp(ctk.CTk):
             if cached_hw:
                 self.detected_hw_encoders = cached_hw
             else:
-                usable, failed = self._detect_working_hw_encoders(ffmpeg_exec, log_failure=True) if ffmpeg_exec else ([], [])
+                usable, failed = mt.detect_working_hw_encoders(ffmpeg_exec) if ffmpeg_exec else ([], [])
                 self.detected_hw_encoders = usable
                 if failed and not usable:
                     self._log(f"发现硬件编码器 {', '.join(failed)} 但自检失败，将改用软件编码")
@@ -1056,7 +1003,7 @@ class SubtitleBlurApp(ctk.CTk):
                     with self._encoder_probe_lock:
                         self._encoder_probe_cache[ffmpeg_exec] = list(self.detected_hw_encoders)
             self._start_encoder_probe_if_needed()
-            effective_encoder = self._auto_pick_encoder(self.detected_hw_encoders)
+            effective_encoder = mt.pick_auto_encoder(self.detected_hw_encoders)
             if self.detected_hw_encoders:
                 labels = ", ".join(self.detected_hw_encoders)
                 self._log(f"检测到可用硬件编码器: {labels}，已选择 {self._encoder_label_from_value(effective_encoder)}")
@@ -1134,58 +1081,14 @@ class SubtitleBlurApp(ctk.CTk):
         self._set_status(f"处理完成（{total} 个文件）")
         self.after(0, setattr, self, "is_processing", False)
 
-    def _ffmpeg_encoder_params(self, encoder: str) -> Tuple[str, List[str], bool]:
-        enc = self._normalize_encoder(encoder)
-        extra: List[str] = []
-        is_hw = False
-        if enc == "libx264":
-            extra = ["-preset", "fast", "-crf", "23"]
-        elif enc == "h264_nvenc":
-            is_hw = True
-            extra = ["-preset", "p4"]
-        elif enc == "h264_qsv":
-            is_hw = True
-            extra = ["-preset", "medium"]
-        elif enc == "h264_amf":
-            is_hw = True
-            extra = ["-quality", "speed"]
-        else:
-            enc = "libx264"
-            extra = ["-preset", "fast", "-crf", "23"]
-        return enc, extra, is_hw
-
-    def _start_ffmpeg_writer(
-        self,
-        out_path: str,
-        width: int,
-        height: int,
-        fps: float,
-        encoder: str,
-        source_path: str,
-        remove_audio: bool,
-    ) -> Tuple[Optional[subprocess.Popen], bool]:
-        ffmpeg_exec = self._resolve_ffmpeg_path()
-        if not ffmpeg_exec:
-            return None, False
-        enc, extra, is_hw = self._ffmpeg_encoder_params(encoder)
-        args = [
-            ffmpeg_exec, "-y", "-loglevel", "error", "-threads", "0",
-            "-f", "rawvideo", "-pix_fmt", "bgr24",
-            "-s", f"{width}x{height}", "-r", f"{fps:.6f}", "-i", "-",
-        ]
-        if not remove_audio:
-            args += ["-i", source_path, "-map", "0:v:0", "-map", "1:a?"]
-        else:
-            args.append("-an")
-        args += ["-c:v", enc, *extra, "-pix_fmt", "yuv420p"]
-        if not remove_audio:
-            args += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
-        args += ["-movflags", "+faststart", out_path]
-        try:
-            proc = subprocess.Popen(args, stdin=subprocess.PIPE)
-            return proc, is_hw
-        except Exception:
-            return None, False
+    def _build_exporter(self) -> VideoExporter:
+        """按当前 ffmpeg 与硬件解码设置构造一个导出器。"""
+        return VideoExporter(
+            ffmpeg_exec=self._resolve_ffmpeg_path(),
+            decode_method=self.hwaccel_method,
+            decode_device=self.hwaccel_device,
+            log=self._log,
+        )
 
     def _process_single_video(
         self,
@@ -1203,155 +1106,17 @@ class SubtitleBlurApp(ctk.CTk):
             pass
         base_name, _ = os.path.splitext(os.path.basename(path))
         out_path = os.path.join(base_dir, f"{base_name}_blurred.mp4")
-
-        attempts = [self.current_encoder]
-        _, _, first_is_hw = self._ffmpeg_encoder_params(self.current_encoder)
-        if first_is_hw and "libx264" not in attempts:
-            attempts.append("libx264")
-
-        last_error: Optional[Exception] = None
-        for enc in attempts:
-            try:
-                return self._process_single_video_with_encoder(
-                    path, roi, method, strength, crop_enabled, out_path, enc, remove_audio
-                )
-            except Exception as exc:
-                last_error = exc
-                self._log(f"{os.path.basename(path)} 使用 {self._encoder_label_from_value(enc)} 失败: {exc}")
-                try:
-                    if os.path.exists(out_path):
-                        os.remove(out_path)
-                except Exception:
-                    pass
-                if enc == attempts[-1]:
-                    break
-                self._log(f"{os.path.basename(path)} 将回退到软件编码重试")
-        if last_error:
-            raise last_error
-        raise RuntimeError("未知错误，编码未完成")
-
-    def _process_single_video_with_encoder(
-        self,
-        path: str,
-        roi: Optional[Tuple[int, int, int, int]],
-        method: str,
-        strength: int,
-        crop_enabled: bool,
-        out_path: str,
-        encoder: str,
-        remove_audio: bool,
-    ) -> str:
-        cap = self._open_video_capture(path)
-        if not cap or not cap.isOpened():
-            raise RuntimeError("无法打开视频")
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        crop_box = None
-        if crop_enabled:
-            target_ratio = 9 / 16
-            cur_ratio = width / height if height else target_ratio
-            if abs(cur_ratio - target_ratio) > 0.01:
-                target_w = int(height * target_ratio)
-                target_h = int(width / target_ratio)
-                if target_w <= width:
-                    x0 = max(0, (width - target_w) // 2)
-                    crop_box = (x0, 0, target_w, height)
-                else:
-                    y0 = max(0, (height - target_h) // 2)
-                    crop_box = (0, y0, width, target_h)
-        out_w = crop_box[2] if crop_box else width
-        out_h = crop_box[3] if crop_box else height
-
-        ffmpeg_proc, using_hw = self._start_ffmpeg_writer(out_path, out_w, out_h, fps, encoder, path, remove_audio)
-        writer: Optional[cv2.VideoWriter] = None
-        used_cv_writer = False
-        if ffmpeg_proc is None:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(out_path, fourcc, fps, (out_w, out_h))
-            if not writer or not writer.isOpened():
-                cap.release()
-                raise RuntimeError("无法创建输出文件")
-            used_cv_writer = True
-        frame_idx = 0
-        last_log = time.time()
-        try:
-            while True:
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    break
-                frame = bc.apply_roi_blur(frame, roi, method, strength)
-                if crop_box:
-                    x0, y0, cw, ch = crop_box
-                    frame = frame[y0: y0 + ch, x0: x0 + cw]
-                if ffmpeg_proc:
-                    try:
-                        assert ffmpeg_proc.stdin is not None
-                        ffmpeg_proc.stdin.write(frame.tobytes())
-                    except Exception as exc:
-                        raise RuntimeError(f"写入编码器失败: {exc}") from exc
-                else:
-                    assert writer is not None
-                    writer.write(frame)
-                now = time.time()
-                if frame_idx == 0 or frame_idx == total or now - last_log >= 1.0:
-                    pct = int(frame_idx * 100 / total) if total else 0
-                    self._log(f"处理中 {os.path.basename(path)}: {frame_idx}/{total} 帧 ({pct}%)")
-                    last_log = now
-                frame_idx += 1
-        finally:
-            cap.release()
-            if ffmpeg_proc:
-                try:
-                    if ffmpeg_proc.stdin:
-                        ffmpeg_proc.stdin.close()
-                except Exception:
-                    pass
-                ret = ffmpeg_proc.wait()
-                if ret != 0:
-                    msg = "硬件编码失败，请检查显卡驱动/ffmpeg" if using_hw else "ffmpeg 编码失败"
-                    raise RuntimeError(msg)
-            elif writer:
-                writer.release()
-        if used_cv_writer and not remove_audio:
-            self._mux_audio(out_path, path)
-        codec = "硬件" if using_hw else "软件"
-        self._log(f"{os.path.basename(path)} {codec}编码完成")
-        return out_path
-
-    def _mux_audio(self, video_path: str, source_path: str) -> None:
-        ffmpeg_exec = self._resolve_ffmpeg_path()
-        if not ffmpeg_exec:
-            self._log("未找到 ffmpeg，无法为输出合成音频")
-            return
-        temp_out = f"{video_path}.tmp_audio.mp4"
-        cmd = [
-            ffmpeg_exec, "-y", "-loglevel", "error",
-            "-i", video_path, "-i", source_path,
-            "-map", "0:v:0", "-map", "1:a?",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest",
-            temp_out,
-        ]
-        try:
-            ret = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if ret.returncode == 0 and os.path.exists(temp_out):
-                try:
-                    os.replace(temp_out, video_path)
-                    self._log("已将源音轨合成到输出文件")
-                except Exception:
-                    pass
-            else:
-                err = ((ret.stderr or "") + (ret.stdout or "")).strip()
-                detail = f": {err.splitlines()[-1]}" if err else ""
-                self._log(f"音轨合成失败，输出为无声视频{detail}")
-        finally:
-            if os.path.exists(temp_out):
-                try:
-                    os.remove(temp_out)
-                except Exception:
-                    pass
+        return self._build_exporter().export(
+            src_path=path,
+            out_path=out_path,
+            roi=roi,
+            method=method,
+            strength=strength,
+            crop_enabled=crop_enabled,
+            remove_audio=remove_audio,
+            encoder=self.current_encoder,
+            preserve_bitrate=True,
+        )
 
     def preview_settings(self) -> None:
         info = (
@@ -1428,63 +1193,17 @@ class SubtitleBlurApp(ctk.CTk):
 
     def _detect_hwaccel_support(self) -> None:
         ffmpeg_exec = self._resolve_ffmpeg_path()
-        if not ffmpeg_exec:
-            return
-        try:
-            proc = subprocess.run(
-                [ffmpeg_exec, "-hide_banner", "-hwaccels"],
-                capture_output=True, text=True, timeout=4,
-            )
-            output = (proc.stdout or "") + (proc.stderr or "")
-        except Exception:
-            return
-        methods: List[str] = []
-        for line in output.splitlines():
-            line = line.strip()
-            if not line or "Hardware acceleration methods" in line:
-                continue
-            methods.append(line)
-        preferred = ["cuda", "d3d11va", "dxva2", "vaapi"]
-        for m in preferred:
-            if m in methods:
-                self.hwaccel_method = m
-                break
+        methods = mt.detect_hwaccels(ffmpeg_exec)
+        self.hwaccel_method = mt.pick_decode_method(methods)
         if self.hwaccel_method == "vaapi" and not self.hwaccel_device:
             self.hwaccel_device = "/dev/dri/renderD128"
 
-    def _build_hwaccel_options(self) -> Optional[str]:
-        method = self.hwaccel_method
-        if not method:
-            return None
-        opts = [f"hw_acceleration;{method}"]
-        if method in ("cuda", "d3d11va", "dxva2"):
-            opts.append("hw_device;0")
-        elif method == "vaapi":
-            device = self.hwaccel_device or "/dev/dri/renderD128"
-            opts.append(f"hw_device;{device}")
-        return "|".join(opts)
-
     def _open_video_capture(self, path: str, update_hw_flag: bool = False) -> "cv2.VideoCapture":
         """打开视频解码句柄，优先尝试硬件加速。update_hw_flag=True 时更新预览状态标志。"""
-        opts = self._build_hwaccel_options()
+        cap, used_hw = mt.open_capture(path, self.hwaccel_method, self.hwaccel_device)
         if update_hw_flag:
-            self._using_hw_preview = False
-        if opts:
-            with self._cap_env_lock:
-                prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
-                try:
-                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = opts
-                    cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
-                finally:
-                    if prev is None:
-                        os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
-                    else:
-                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev
-            if cap is not None and cap.isOpened():
-                if update_hw_flag:
-                    self._using_hw_preview = True
-                return cap
-        return cv2.VideoCapture(path)
+            self._using_hw_preview = used_hw
+        return cap
 
     def _maximize_window(self) -> None:
         try:
@@ -1527,58 +1246,35 @@ class SubtitleBlurApp(ctk.CTk):
         return self.encoder_options[0][0]
 
     def _load_config(self) -> None:
-        cfg_path = self.config_path
-        if not os.path.isfile(cfg_path) and os.path.isfile(self.legacy_config_path):
-            cfg_path = self.legacy_config_path
-        if not os.path.isfile(cfg_path):
-            return
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self.ffmpeg_path = data.get("ffmpeg_path") or None
-                self.output_dir = data.get("output_dir") or None
-                ra = data.get("remove_audio")
-                if isinstance(ra, bool):
-                    self.remove_audio.set(ra)
-                crop = data.get("crop_9x16")
-                if isinstance(crop, bool):
-                    self.crop_9x16.set(crop)
-                rm_after = data.get("remove_after_export")
-                if isinstance(rm_after, bool):
-                    self.remove_after.set(rm_after)
-                enc = data.get("encoder")
-                if isinstance(enc, str):
-                    self.encoder_var.set(self._encoder_label_from_value(enc))
-                blur_method = data.get("blur_method")
-                if isinstance(blur_method, str):
-                    self.blur_method_var.set(self._blur_label_from_value(blur_method))
-                blur_strength = data.get("blur_strength")
-                if isinstance(blur_strength, int):
-                    self.blur_strength.set(blur_strength)
-            if cfg_path == self.legacy_config_path:
-                self._save_config()
-        except Exception:
-            pass
+        cfg = AppConfig.load(self.config_path, self.legacy_config_path)
+        self.ffmpeg_path = cfg.ffmpeg_path
+        self.output_dir = cfg.output_dir
+        self.remove_audio.set(cfg.remove_audio)
+        self.crop_9x16.set(cfg.crop_9x16)
+        self.remove_after.set(cfg.remove_after_export)
+        self.encoder_var.set(self._encoder_label_from_value(cfg.encoder))
+        self.blur_method_var.set(self._blur_label_from_value(cfg.blur_method))
+        self.blur_strength.set(cfg.blur_strength)
+        # 若仅存在旧版配置文件，迁移到新路径。
+        if not os.path.isfile(self.config_path) and os.path.isfile(self.legacy_config_path):
+            self._save_config()
+
+    def _current_config(self) -> AppConfig:
+        return AppConfig(
+            ffmpeg_path=self.ffmpeg_path,
+            output_dir=self.output_dir,
+            remove_audio=bool(self.remove_audio.get()),
+            crop_9x16=bool(self.crop_9x16.get()),
+            remove_after_export=bool(self.remove_after.get()),
+            encoder=self._normalize_encoder(self.encoder_var.get()),
+            blur_method=self._normalize_blur_method(self.blur_method_var.get()),
+            blur_strength=int(self.blur_strength.get()),
+        )
 
     def _save_config(self) -> None:
-        data = {
-            "ffmpeg_path": self.ffmpeg_path,
-            "output_dir": self.output_dir,
-            "remove_audio": bool(self.remove_audio.get()),
-            "crop_9x16": bool(self.crop_9x16.get()),
-            "remove_after_export": bool(self.remove_after.get()),
-            "encoder": self._normalize_encoder(self.encoder_var.get()),
-            "blur_method": self._normalize_blur_method(self.blur_method_var.get()),
-            "blur_strength": int(self.blur_strength.get()),
-        }
-        try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
+        if not self._current_config().save(self.config_path):
             self._log("保存配置失败")
-        finally:
-            self._save_job = None
+        self._save_job = None
 
     def _auto_save_config(self, delay_ms: int = 300) -> None:
         if self._save_job:
