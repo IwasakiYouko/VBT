@@ -55,6 +55,20 @@ def kernel_size(strength: int) -> int:
     return min(k, 99)
 
 
+def effective_kernel(strength: int, region_h: int, region_w: int) -> int:
+    """按强度与区域尺寸计算模糊核：核随 ROI 短边缩放，保证大字幕也能被抹平。
+
+    仅凭强度的固定核（最大 99）对 1080p 及以上的大号字幕不够——文字剪影
+    仍可辨认。让核跟随框选区域的短边（通常是字幕条高度）放大即可解决。
+    """
+    base = kernel_size(strength)
+    size_k = int(min(region_h, region_w) * max(5, int(strength)) / 130)
+    k = max(base, size_k)
+    if k % 2 == 0:
+        k += 1
+    return min(k, 199)
+
+
 def pixelate(region, block: int):
     h, w = region.shape[:2]
     block = max(2, min(block, w, h))
@@ -133,7 +147,7 @@ def inpaint_region(region, strength: int):
         return region
     # 掩膜几乎覆盖全区时 inpaint 无有效参考，退化为模糊以保证遮住字幕。
     if cv2.countNonZero(mask) / mask.size > 0.9:
-        k = kernel_size(strength)
+        k = effective_kernel(strength, region.shape[0], region.shape[1])
         return cv2.GaussianBlur(region, (k, k), 0)
     radius = max(3, int(strength) // 20)
     try:
@@ -144,7 +158,7 @@ def inpaint_region(region, strength: int):
 
 def frosted_glass(region, strength: int):
     """毛玻璃/磨砂：强模糊叠加轻微噪声，观感比纯高斯更自然。"""
-    k = kernel_size(strength)
+    k = effective_kernel(strength, region.shape[0], region.shape[1])
     base = cv2.GaussianBlur(region, (k, k), 0)
     noise = np.random.randint(-8, 9, base.shape, dtype=np.int16)
     return np.clip(base.astype(np.int16) + noise, 0, 255).astype(np.uint8)
@@ -207,11 +221,11 @@ def apply_masks(frame, masks, frame_index: int, temporal_bg=None):
 
 
 def blur_region(region, method: str, strength: int):
-    k = kernel_size(strength)
+    k = effective_kernel(strength, region.shape[0], region.shape[1])
     if method == "gaussian":
         return cv2.GaussianBlur(region, (k, k), 0)
     if method == "median":
-        return cv2.medianBlur(region, k)
+        return cv2.medianBlur(region, kernel_size(strength))
     if method == "box":
         return cv2.blur(region, (k, k))
     if method == "pixelate":
@@ -228,23 +242,24 @@ def blur_region(region, method: str, strength: int):
 
 
 def apply_blur_to_target(target, method: str, strength: int):
-    """尽量原地模糊 ROI，减少额外复制开销。"""
+    """尽量原地模糊 ROI，减少额外复制开销。核大小随区域尺寸自适应。"""
     if method == "surface":  # 兼容旧配置
         method = "gaussian"
-    k = kernel_size(strength)
+    k = effective_kernel(strength, target.shape[0], target.shape[1])
     if method == "gaussian":
-        if _apply_cuda_filter(target, method, strength):
+        if _apply_cuda_filter(target, method, strength, k):
             return target
         return cv2.GaussianBlur(target, (k, k), 0, dst=target)
     if method == "box":
-        if _apply_cuda_filter(target, method, strength):
+        if _apply_cuda_filter(target, method, strength, k):
             return target
         return cv2.blur(target, (k, k), dst=target)
     if method == "median":
-        target[:] = cv2.medianBlur(target, k)
+        # medianBlur 对大核开销为 O(k^2)，沿用仅按强度的小核。
+        target[:] = cv2.medianBlur(target, kernel_size(strength))
         return target
     if method == "double":
-        if _apply_cuda_filter(target, method, strength):
+        if _apply_cuda_filter(target, method, strength, k):
             return target
         cv2.GaussianBlur(target, (k, k), 0, dst=target)
         return cv2.blur(target, (k, k), dst=target)
@@ -314,13 +329,14 @@ def _get_cuda_filter(method: str, k: int, channels: int):
     return flt
 
 
-def _apply_cuda_filter(target, method: str, strength: int) -> bool:
+def _apply_cuda_filter(target, method: str, strength: int, k: Optional[int] = None) -> bool:
     if not _cuda_available():
         return False
     src, channels = _safe_bgr(target)
     if src is None or channels not in (1, 3):
         return False
-    k = kernel_size(strength)
+    if k is None:
+        k = kernel_size(strength)
     try:
         gpu = cv2.cuda_GpuMat()
         gpu.upload(src)

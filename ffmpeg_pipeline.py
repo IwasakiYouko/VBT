@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+from blur_core import effective_kernel
+
 # 可用融合管线表达的方法（其余走逐帧 Python 路径）。
 FUSED_METHODS = frozenset(
     {"gaussian", "box", "double", "pixelate", "pixelate_strong", "pixelate_gaussian"}
@@ -49,15 +51,28 @@ def _clamp_rect(rect: Tuple[int, int, int, int], width: int, height: int):
     return x, y, cw, ch
 
 
-def _region_filter(method: str, strength: int) -> str:
+def _region_filter(method: str, strength: int, region_w: int, region_h: int) -> str:
+    """生成与 CPU 路径(blur_core)同等强度的 ffmpeg 滤镜串，保证预览=导出。
+
+    核大小与 blur_core.effective_kernel 一致：随 ROI 短边缩放，大字幕也能抹平。
+    """
     strength = max(5, int(strength))
-    if method in ("pixelate", "pixelate_strong", "pixelate_gaussian"):
+    k = effective_kernel(strength, region_h, region_w)
+    # 与 OpenCV GaussianBlur(sigma=0) 的自动 sigma 保持一致。
+    sigma = round(0.3 * ((k - 1) * 0.5 - 1) + 0.8, 2)
+    box_radius = max(1, k // 2)
+    if method in ("pixelate", "pixelate_strong"):
         block = max(6, strength // 4) if method == "pixelate_strong" else max(4, strength // 8)
         return f"pixelize=w={block}:h={block}"
-    sigma = max(1.5, strength / 8.0)
+    if method == "pixelate_gaussian":
+        block = max(4, strength // 8)
+        return f"pixelize=w={block}:h={block},gblur=sigma={sigma}"
+    if method == "box":
+        return f"avgblur=sizeX={box_radius}:sizeY={box_radius}"
     if method == "double":
-        sigma *= 1.4
-    return f"gblur=sigma={round(sigma, 2)}"
+        # 高斯 + 均值双通道，与 blur_core 的 double 一致（box 通道是抹掉文字的主力）。
+        return f"gblur=sigma={sigma},avgblur=sizeX={box_radius}:sizeY={box_radius}"
+    return f"gblur=sigma={sigma}"
 
 
 def build_filtergraph(
@@ -81,7 +96,7 @@ def build_filtergraph(
         x, y, cw, ch = _clamp_rect(kf[0][1], width, height)
         if cw < 2 or ch < 2:
             continue
-        filt = _region_filter(mask.method, mask.strength)
+        filt = _region_filter(mask.method, mask.strength, cw, ch)
         base, region, blurred, out = f"b{idx}", f"r{idx}", f"rb{idx}", f"v{idx}"
         stages.append(f"[{cur}]split[{base}][{region}]")
         stages.append(f"[{region}]crop={cw}:{ch}:{x}:{y},{filt}[{blurred}]")
