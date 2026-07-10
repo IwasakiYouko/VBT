@@ -225,7 +225,8 @@ def encoder_params(encoder: str, bitrate: Optional[int]) -> Tuple[str, List[str]
     )
 
     if encoder == "h264_nvenc":
-        extra = ["-preset", "p5", "-rc", "vbr", "-multipass", "qres"]
+        # 单趟 VBR：更快、且兼容 Pascal(1050Ti)；不使用 Turing+ 才稳的 -multipass。
+        extra = ["-preset", "p5", "-rc", "vbr"]
         extra += rate_args if bitrate else ["-cq", "20"]
         return encoder, extra, True
     if encoder == "h264_qsv":
