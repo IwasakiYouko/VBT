@@ -143,6 +143,9 @@ class SubtitleBlurApp(ctk.CTk):
         self._using_hw_preview = False
         self._resize_job: Optional[str] = None
         self._strength_job: Optional[str] = None
+        # 框选拖动时的实时预览节流。
+        self._live_drag_job: Optional[str] = None
+        self._pending_drag: Optional[Tuple[int, int, int, int]] = None
         self._last_frame_cache: Optional[Tuple[int, int, "cv2.Mat"]] = None
         self._preview_image_item: Optional[int] = None
         self._encoder_probe_cache: dict[str, List[str]] = {}
@@ -642,18 +645,15 @@ class SubtitleBlurApp(ctk.CTk):
         self._store_preview_cache(generation, frame_idx, frame)
         self._render_frame(frame_idx, frame, update_slider)
 
-    def _render_frame(self, frame_idx: int, frame, update_slider: bool) -> None:
-        orig_h, orig_w, _ = frame.shape
+    def _blit_bgr(self, frame_bgr) -> None:
+        """把一张 BGR 图缩放贴到画布（供正常渲染与拖动实时预览复用）。"""
+        orig_h, orig_w = frame_bgr.shape[:2]
         self.frame_size = (orig_w, orig_h)
         disp_w, disp_h, scale, off_x, off_y = self._fit_to_preview(orig_w, orig_h)
-        apply_blur = bool(self._current_masks()) and not self._seeking_active
-        if apply_blur:
-            frame = self._apply_preview_masks(frame, frame_idx)
         if (orig_w, orig_h) != (disp_w, disp_h):
-            frame = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(frame)
-        self.preview_image = ImageTk.PhotoImage(image)
+            frame_bgr = cv2.resize(frame_bgr, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        self.preview_image = ImageTk.PhotoImage(Image.fromarray(rgb))
         center_x = self.preview_size[0] // 2
         center_y = self.preview_size[1] // 2
         if self._preview_image_item is None:
@@ -662,9 +662,15 @@ class SubtitleBlurApp(ctk.CTk):
         else:
             self.preview_canvas.itemconfig(self._preview_image_item, image=self.preview_image)
             self.preview_canvas.coords(self._preview_image_item, center_x, center_y)
-        self.preview_canvas.delete("roi")
         self.preview_scale = scale
         self.preview_offset = (off_x, off_y)
+
+    def _render_frame(self, frame_idx: int, frame, update_slider: bool) -> None:
+        apply_blur = bool(self._current_masks()) and not self._seeking_active
+        if apply_blur:
+            frame = self._apply_preview_masks(frame, frame_idx)
+        self._blit_bgr(frame)
+        self.preview_canvas.delete("roi")
         self._draw_mask_rects(frame_idx)
         self.current_frame_idx = frame_idx
         if update_slider:
@@ -849,8 +855,10 @@ class SubtitleBlurApp(ctk.CTk):
             text=f"遮罩 {self.active_mask_index + 1} [{motion}]  x={x} y={y} w={w} h={h}"
         )
 
-    def _draw_mask_rects(self, frame_idx: int) -> None:
+    def _draw_mask_rects(self, frame_idx: int, skip_index: Optional[int] = None) -> None:
         for i, mask in enumerate(self._current_masks()):
+            if i == skip_index:
+                continue
             rect = mask.rect_at(frame_idx)
             if not rect:
                 continue
@@ -882,10 +890,53 @@ class SubtitleBlurApp(ctk.CTk):
         if not self.drag_start or not self.drag_rect:
             return
         self.preview_canvas.coords(self.drag_rect, self.drag_start[0], self.drag_start[1], event.x, event.y)
+        # 实时预览：节流地把当前拖动区域的遮罩效果渲染出来。
+        self._pending_drag = (self.drag_start[0], self.drag_start[1], event.x, event.y)
+        if self._live_drag_job is None:
+            self._live_drag_job = self.after(40, self._flush_live_drag)
+
+    def _flush_live_drag(self) -> None:
+        self._live_drag_job = None
+        if not self._pending_drag or not self.drag_rect:
+            return
+        cached = self._last_frame_cache
+        if not cached:
+            return
+        gen, idx, base = cached
+        if gen != self._preview_generation:
+            return
+        x0, y0, x1, y1 = self._pending_drag
+        rect = self._display_to_video_rect(x0, y0, x1, y1)
+        if not rect:
+            return
+        work = base.copy()
+        # 先应用其它已提交遮罩（跳过正在重画的当前遮罩），再叠加拖动中的临时区域。
+        masks = self._current_masks()
+        for i, mask in enumerate(masks):
+            if i == self.active_mask_index:
+                continue
+            r = mask.rect_at(idx)
+            if r:
+                method = "inpaint" if mask.method == "inpaint_temporal" else mask.method
+                bc.apply_roi_blur(work, r, method, mask.strength)
+        method = self._normalize_blur_method(self.blur_method_var.get())
+        if method == "inpaint_temporal":
+            method = "inpaint"
+        strength = max(int(self.blur_strength.get()), 5)
+        bc.apply_roi_blur(work, rect, method, strength)
+        self._blit_bgr(work)
+        self.preview_canvas.delete("roi")
+        self._draw_mask_rects(idx, skip_index=self.active_mask_index)
+        if self.drag_rect:
+            self.preview_canvas.tag_raise(self.drag_rect)
 
     def _on_canvas_release(self, event: tk.Event) -> None:
         if not self.drag_start:
             return
+        if self._live_drag_job:
+            self.after_cancel(self._live_drag_job)
+            self._live_drag_job = None
+        self._pending_drag = None
         x0, y0 = self.drag_start
         x1, y1 = event.x, event.y
         if self.drag_rect:
@@ -1516,6 +1567,8 @@ class SubtitleBlurApp(ctk.CTk):
             self._seek_token += 1
             if self._seek_job:
                 self.after_cancel(self._seek_job)
+            if self._live_drag_job:
+                self.after_cancel(self._live_drag_job)
             self._pending_seek_frame = None
         except Exception:
             pass
