@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+gpu_benchmark_report.txt
+_bench_src.mp4
