@@ -17,6 +17,30 @@ from exporter import VideoExporter
 from masks import Mask
 
 
+def ellipsize_middle(text: str, max_units: int = 44) -> str:
+    """按显示宽度做中间截断（CJK 记 2 个单位），防止长文件名把布局撑宽。"""
+    def units(ch: str) -> int:
+        return 2 if ord(ch) > 0x2E80 else 1
+
+    if sum(units(c) for c in text) <= max_units:
+        return text
+    head_budget = int((max_units - 2) * 0.6)
+    tail_budget = max_units - 2 - head_budget
+    head, used = [], 0
+    for ch in text:
+        if used + units(ch) > head_budget:
+            break
+        head.append(ch)
+        used += units(ch)
+    tail, used = [], 0
+    for ch in reversed(text):
+        if used + units(ch) > tail_budget:
+            break
+        tail.append(ch)
+        used += units(ch)
+    return "".join(head) + "…" + "".join(reversed(tail))
+
+
 class SubtitleBlurApp(ctk.CTk):
     """字幕消除工具主界面。"""
 
@@ -483,7 +507,10 @@ class SubtitleBlurApp(ctk.CTk):
     def _update_preview_selector(self) -> None:
         if not hasattr(self, "preview_menu"):
             return
-        values = [f"{idx + 1}. {os.path.basename(p)}" for idx, p in enumerate(self.video_paths)]
+        values = [
+            f"{idx + 1}. {ellipsize_middle(os.path.basename(p), 40)}"
+            for idx, p in enumerate(self.video_paths)
+        ]
         self.preview_choices = values
         self.preview_choice_map = {v: idx for idx, v in enumerate(values)}
         if not values:
@@ -1509,11 +1536,13 @@ class SubtitleBlurApp(ctk.CTk):
         self._ui_safe(_append)
 
     def _set_status(self, text: str) -> None:
-        self._ui_safe(self.status_label.configure, text=text)
+        # 状态栏是撑宽右栏的另一来源，同样按显示宽度截断。
+        self._ui_safe(self.status_label.configure, text=ellipsize_middle(text, 52))
 
     def _list_button_label(self, idx: int, path: str, processing: bool) -> str:
         prefix = "⏳ " if processing else ""
-        return f"{prefix}{idx + 1}. {os.path.basename(path)}"
+        name = ellipsize_middle(os.path.basename(path), 42)
+        return f"{prefix}{idx + 1}. {name}"
 
     def _style_list_button(self, button: ctk.CTkButton, state: str) -> None:
         style = self.list_button_styles.get(state, self.list_button_styles["normal"])
