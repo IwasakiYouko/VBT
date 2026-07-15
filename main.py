@@ -15,30 +15,7 @@ import media_tools as mt
 from app_config import AppConfig
 from exporter import VideoExporter
 from masks import Mask
-
-
-def ellipsize_middle(text: str, max_units: int = 44) -> str:
-    """按显示宽度做中间截断（CJK 记 2 个单位），防止长文件名把布局撑宽。"""
-    def units(ch: str) -> int:
-        return 2 if ord(ch) > 0x2E80 else 1
-
-    if sum(units(c) for c in text) <= max_units:
-        return text
-    head_budget = int((max_units - 2) * 0.6)
-    tail_budget = max_units - 2 - head_budget
-    head, used = [], 0
-    for ch in text:
-        if used + units(ch) > head_budget:
-            break
-        head.append(ch)
-        used += units(ch)
-    tail, used = [], 0
-    for ch in reversed(text):
-        if used + units(ch) > tail_budget:
-            break
-        tail.append(ch)
-        used += units(ch)
-    return "".join(head) + "…" + "".join(reversed(tail))
+from ui_widgets import Tooltip, XYScrollFrame, ellipsize_middle
 
 
 class SubtitleBlurApp(ctk.CTk):
@@ -185,9 +162,9 @@ class SubtitleBlurApp(ctk.CTk):
 
     # ------------------------------------------------------------------ UI
     def _build_layout(self) -> None:
-        # 预览在左（列 0，权重大），列表+设置在右（列 1，固定宽）
-        self.grid_columnconfigure(0, weight=5)
-        self.grid_columnconfigure(1, weight=1, minsize=280)
+        # 预览在左（列 0，占满全部弹性空间），列表+日志在右（列 1，宽度完全固定）
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0, minsize=400)
         self.grid_rowconfigure(0, weight=1)
 
         # ── 右侧面板（列表 + 日志） ──
@@ -208,9 +185,9 @@ class SubtitleBlurApp(ctk.CTk):
         ctk.CTkLabel(panel_list, text="视频列表", font=ctk.CTkFont(size=16, weight="bold")).grid(
             row=0, column=0, sticky="w", padx=14, pady=(14, 6)
         )
-        self.list_frame = ctk.CTkScrollableFrame(panel_list, height=260, corner_radius=10, fg_color="#141820")
+        # 双向滚动列表：竖向翻列表，横向滑动查看完整文件名。
+        self.list_frame = XYScrollFrame(panel_list, height=260, corner_radius=10, fg_color="#141820")
         self.list_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        self.list_frame.grid_columnconfigure(0, weight=1)
         self._refresh_list()
 
         btn_frame = ctk.CTkFrame(panel_list, fg_color="transparent")
@@ -262,6 +239,7 @@ class SubtitleBlurApp(ctk.CTk):
             width=220,
         )
         self.preview_menu.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        Tooltip(self.preview_menu, self._current_video_fullname)
 
         canvas_wrap = ctk.CTkFrame(preview_frame, fg_color="#0d1017", corner_radius=10)
         canvas_wrap.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 6))
@@ -504,6 +482,11 @@ class SubtitleBlurApp(ctk.CTk):
             self._start_encoder_probe_if_needed(force=True)
 
     # ------------------------------------------------------------------ 预览与区域选择
+    def _current_video_fullname(self) -> str:
+        if self.preview_index is not None and 0 <= self.preview_index < len(self.video_paths):
+            return os.path.basename(self.video_paths[self.preview_index])
+        return ""
+
     def _update_preview_selector(self) -> None:
         if not hasattr(self, "preview_menu"):
             return
@@ -1507,13 +1490,14 @@ class SubtitleBlurApp(ctk.CTk):
             self.list_placeholder = None
         if not self.video_paths:
             self.list_placeholder = ctk.CTkLabel(
-                self.list_frame, text="暂无视频，点击「添加视频」开始", text_color="#4a5568"
+                self.list_frame.inner, text="暂无视频，点击「添加视频」开始", text_color="#4a5568"
             )
             self.list_placeholder.pack(pady=16)
+            self.list_frame.bind_tree()
             return
         for idx, p in enumerate(self.video_paths):
             btn = ctk.CTkButton(
-                self.list_frame,
+                self.list_frame.inner,
                 text=self._list_button_label(idx, p, False),
                 anchor="w",
                 corner_radius=8,
@@ -1521,7 +1505,9 @@ class SubtitleBlurApp(ctk.CTk):
                 command=lambda i=idx: self._on_list_button_click(i),
             )
             btn.pack(fill="x", padx=6, pady=3)
+            Tooltip(btn, os.path.basename(p))
             self.list_buttons.append(btn)
+        self.list_frame.bind_tree()
         self._apply_list_highlight()
 
     def _log(self, text: str) -> None:
@@ -1540,9 +1526,9 @@ class SubtitleBlurApp(ctk.CTk):
         self._ui_safe(self.status_label.configure, text=ellipsize_middle(text, 52))
 
     def _list_button_label(self, idx: int, path: str, processing: bool) -> str:
+        # 完整文件名：视口装不下的部分由列表的横向滚动条与悬停提示兜底。
         prefix = "⏳ " if processing else ""
-        name = ellipsize_middle(os.path.basename(path), 42)
-        return f"{prefix}{idx + 1}. {name}"
+        return f"{prefix}{idx + 1}. {os.path.basename(path)}"
 
     def _style_list_button(self, button: ctk.CTkButton, state: str) -> None:
         style = self.list_button_styles.get(state, self.list_button_styles["normal"])

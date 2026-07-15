@@ -61,6 +61,7 @@ python main.py
 ## 代码结构
 
 - `main.py`：图形界面与交互逻辑。
+- `ui_widgets.py`：可复用 UI 小部件（宽度感知截断 `ellipsize_middle`、悬停提示 `Tooltip`、双向滚动容器 `XYScrollFrame`）。
 - `app_config.py`：配置文件的读写与旧版本迁移（`AppConfig`）。
 - `media_tools.py`：ffmpeg / ffprobe 探测、硬件解码/编码检测、源码率读取、编码参数生成。
 - `exporter.py`：`VideoExporter` 导出管线（融合式 GPU 管线优先，回退逐帧：解码 → 遮罩 → 可选 9:16 裁剪 → 编码），含硬件→软件编码回退。
