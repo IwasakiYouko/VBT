@@ -62,6 +62,7 @@ python main.py
 
 - `main.py`：图形界面与交互逻辑。
 - `ui_widgets.py`：可复用 UI 小部件（宽度感知截断 `ellipsize_middle`、悬停提示 `Tooltip`、双向滚动容器 `XYScrollFrame`）。
+- `theme.py`：Material Design 3 深色主题（参考 Google 设计规范）——表面层级、语义色、圆角与各类控件的配色组合，全部界面颜色集中于此。
 - `app_config.py`：配置文件的读写与旧版本迁移（`AppConfig`）。
 - `media_tools.py`：ffmpeg / ffprobe 探测、硬件解码/编码检测、源码率读取、编码参数生成。
 - `exporter.py`：`VideoExporter` 导出管线（融合式 GPU 管线优先，回退逐帧：解码 → 遮罩 → 可选 9:16 裁剪 → 编码），含硬件→软件编码回退。

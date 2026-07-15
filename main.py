@@ -15,6 +15,7 @@ import media_tools as mt
 from app_config import AppConfig
 from exporter import VideoExporter
 from masks import Mask
+import theme
 from ui_widgets import Tooltip, XYScrollFrame, ellipsize_middle
 
 
@@ -25,6 +26,7 @@ class SubtitleBlurApp(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("dark-blue")
+        self.configure(fg_color=theme.BG)
 
         self.title("字幕消除工具")
         self.geometry("800x600")
@@ -44,32 +46,32 @@ class SubtitleBlurApp(ctk.CTk):
         self.list_placeholder: Optional[ctk.CTkLabel] = None
         self.list_button_styles = {
             "normal": {
-                "fg_color": "#1f232a",
-                "hover_color": "#2a303a",
-                "text_color": "#d7dbe2",
+                "fg_color": theme.SURFACE_2,
+                "hover_color": theme.SURFACE_3,
+                "text_color": theme.TEXT,
                 "border_width": 0,
-                "border_color": "#1f232a",
+                "border_color": theme.SURFACE_2,
             },
             "active": {
-                "fg_color": "#1e5bbf",
-                "hover_color": "#174a9e",
-                "text_color": "#ffffff",
+                "fg_color": theme.PRIMARY,
+                "hover_color": theme.PRIMARY_HOVER,
+                "text_color": theme.TEXT_ON_ACCENT,
                 "border_width": 0,
-                "border_color": "#1e5bbf",
+                "border_color": theme.PRIMARY,
             },
             "processing": {
-                "fg_color": "#b45309",
-                "hover_color": "#92400e",
-                "text_color": "#ffffff",
+                "fg_color": theme.WARNING,
+                "hover_color": theme.WARNING_HOVER,
+                "text_color": theme.TEXT_ON_ACCENT,
                 "border_width": 0,
-                "border_color": "#b45309",
+                "border_color": theme.WARNING,
             },
             "active_processing": {
-                "fg_color": "#b45309",
-                "hover_color": "#92400e",
-                "text_color": "#ffffff",
+                "fg_color": theme.WARNING,
+                "hover_color": theme.WARNING_HOVER,
+                "text_color": theme.TEXT_ON_ACCENT,
                 "border_width": 2,
-                "border_color": "#1e5bbf",
+                "border_color": theme.PRIMARY_DIM,
             },
         }
 
@@ -168,53 +170,65 @@ class SubtitleBlurApp(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # ── 右侧面板（列表 + 日志） ──
-        panel_list = ctk.CTkFrame(self, corner_radius=12)
+        panel_list = ctk.CTkFrame(self, corner_radius=theme.RADIUS_CARD, fg_color=theme.SURFACE)
         panel_list.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
         panel_list.grid_columnconfigure(0, weight=1)
         panel_list.grid_rowconfigure(1, weight=2)
         panel_list.grid_rowconfigure(4, weight=1)
 
         # ── 左侧面板（预览 + 设置） ──
-        panel_preview = ctk.CTkFrame(self, corner_radius=12)
+        panel_preview = ctk.CTkFrame(self, corner_radius=theme.RADIUS_CARD, fg_color=theme.SURFACE)
         panel_preview.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
         panel_preview.grid_columnconfigure(0, weight=1)
         panel_preview.grid_rowconfigure(0, weight=7)
         panel_preview.grid_rowconfigure(1, weight=2, minsize=300)
 
         # ===== 视频列表区 =====
-        ctk.CTkLabel(panel_list, text="视频列表", font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=14, pady=(14, 6)
-        )
+        ctk.CTkLabel(
+            panel_list, text="视频列表", font=ctk.CTkFont(size=16, weight="bold"), text_color=theme.TEXT
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
         # 双向滚动列表：竖向翻列表，横向滑动查看完整文件名。
-        self.list_frame = XYScrollFrame(panel_list, height=260, corner_radius=10, fg_color="#141820")
+        self.list_frame = XYScrollFrame(
+            panel_list, height=260, corner_radius=theme.RADIUS_WIDGET, fg_color=theme.SURFACE_DIM
+        )
         self.list_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
         self._refresh_list()
 
         btn_frame = ctk.CTkFrame(panel_list, fg_color="transparent")
         btn_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
         btn_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="listbtns")
-        ctk.CTkButton(btn_frame, text="添加视频", command=self.add_videos).grid(
-            row=0, column=0, padx=(0, 3), pady=0, sticky="ew"
-        )
-        ctk.CTkButton(btn_frame, text="移除选中", command=self._remove_selected_video).grid(
-            row=0, column=1, padx=3, pady=0, sticky="ew"
-        )
+        ctk.CTkButton(
+            btn_frame, text="添加视频", command=self.add_videos,
+            corner_radius=theme.RADIUS_PILL, **theme.filled_button(),
+        ).grid(row=0, column=0, padx=(0, 3), pady=0, sticky="ew")
+        ctk.CTkButton(
+            btn_frame, text="移除选中", command=self._remove_selected_video,
+            corner_radius=theme.RADIUS_PILL, **theme.tonal_button(),
+        ).grid(row=0, column=1, padx=3, pady=0, sticky="ew")
         ctk.CTkButton(
             btn_frame, text="清空列表", command=self.clear_list,
-            fg_color="#7f1d1d", hover_color="#991b1b",
+            corner_radius=theme.RADIUS_PILL, **theme.danger_button(),
         ).grid(row=0, column=2, padx=(3, 0), pady=0, sticky="ew")
 
         # ===== 日志区 =====
-        ctk.CTkLabel(panel_list, text="日志", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=3, column=0, sticky="w", padx=14
+        ctk.CTkLabel(
+            panel_list, text="日志", font=ctk.CTkFont(size=14, weight="bold"), text_color=theme.TEXT
+        ).grid(row=3, column=0, sticky="w", padx=16)
+        self.log_box = ctk.CTkTextbox(
+            panel_list, corner_radius=theme.RADIUS_WIDGET, font=ctk.CTkFont(size=12),
+            fg_color=theme.SURFACE_DIM, text_color=theme.TEXT_SECONDARY,
         )
-        self.log_box = ctk.CTkTextbox(panel_list, corner_radius=10, font=ctk.CTkFont(size=12))
         self.log_box.grid(row=4, column=0, sticky="nsew", padx=12, pady=(6, 4))
-        self.progress_bar = ctk.CTkProgressBar(panel_list, height=8, corner_radius=4)
-        self.progress_bar.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 4))
+        self.progress_bar = ctk.CTkProgressBar(
+            panel_list, height=6, corner_radius=3,
+            progress_color=theme.PRIMARY, fg_color=theme.SURFACE_3,
+        )
+        self.progress_bar.grid(row=5, column=0, sticky="ew", padx=12, pady=(2, 4))
         self.progress_bar.set(0)
-        self.status_label = ctk.CTkLabel(panel_list, text="就绪", anchor="w", text_color="#7a8fa6")
-        self.status_label.grid(row=6, column=0, sticky="ew", padx=14, pady=(0, 10))
+        self.status_label = ctk.CTkLabel(
+            panel_list, text="就绪", anchor="w", text_color=theme.TEXT_SECONDARY
+        )
+        self.status_label.grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 10))
 
         # ===== 预览画布区 =====
         preview_frame = ctk.CTkFrame(panel_preview, corner_radius=12)
@@ -228,20 +242,22 @@ class SubtitleBlurApp(ctk.CTk):
         header = ctk.CTkFrame(preview_frame, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
         header.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(header, text="处理 / 预览", font=ctk.CTkFont(size=15, weight="bold")).grid(
-            row=0, column=0, sticky="w"
-        )
+        ctk.CTkLabel(
+            header, text="处理 / 预览", font=ctk.CTkFont(size=15, weight="bold"), text_color=theme.TEXT
+        ).grid(row=0, column=0, sticky="w")
         self.preview_menu = ctk.CTkOptionMenu(
             header,
             variable=self.preview_var,
             values=self.preview_choices or ["请选择视频"],
             command=self._on_preview_select,
             width=220,
+            corner_radius=theme.RADIUS_WIDGET,
+            **theme.option_menu(),
         )
         self.preview_menu.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         Tooltip(self.preview_menu, self._current_video_fullname)
 
-        canvas_wrap = ctk.CTkFrame(preview_frame, fg_color="#0d1017", corner_radius=10)
+        canvas_wrap = ctk.CTkFrame(preview_frame, fg_color=theme.CANVAS_BG, corner_radius=theme.RADIUS_WIDGET)
         canvas_wrap.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 6))
         canvas_wrap.grid_columnconfigure(0, weight=1)
         canvas_wrap.grid_rowconfigure(0, weight=1)
@@ -249,7 +265,7 @@ class SubtitleBlurApp(ctk.CTk):
             canvas_wrap,
             width=self.preview_size[0],
             height=self.preview_size[1],
-            bg="#0d1017",
+            bg=theme.CANVAS_BG,
             highlightthickness=0,
             cursor="crosshair",
         )
@@ -262,27 +278,33 @@ class SubtitleBlurApp(ctk.CTk):
         seek_row = ctk.CTkFrame(preview_frame, fg_color="transparent")
         seek_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 4))
         seek_row.grid_columnconfigure(1, weight=1)
-        self.frame_label = ctk.CTkLabel(seek_row, text="帧 0/0 (00:00/00:00)", text_color="#8a9ab0")
+        self.frame_label = ctk.CTkLabel(seek_row, text="帧 0/0 (00:00/00:00)", text_color=theme.TEXT_SECONDARY)
         self.frame_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.timeline_slider = ctk.CTkSlider(seek_row, from_=0, to=1, command=self._on_seek)
+        self.timeline_slider = ctk.CTkSlider(
+            seek_row, from_=0, to=1, command=self._on_seek, **theme.slider()
+        )
         self.timeline_slider.grid(row=0, column=1, sticky="ew")
 
         preview_actions = ctk.CTkFrame(preview_frame, fg_color="transparent")
         preview_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
         preview_actions.grid_columnconfigure(0, weight=1)
         self.roi_label = ctk.CTkLabel(
-            preview_actions, text="在画面中拖拽框选遮罩区域", text_color="#8a9ab0", anchor="w"
+            preview_actions, text="在画面中拖拽框选遮罩区域", text_color=theme.TEXT_SECONDARY, anchor="w"
         )
         self.roi_label.grid(row=0, column=0, sticky="ew")
-        ctk.CTkButton(preview_actions, text="删除关键帧", width=96, command=self._delete_current_keyframe).grid(
-            row=0, column=1, sticky="e", padx=(8, 4)
-        )
         ctk.CTkButton(
-            preview_actions, text="转为静态", width=84, command=self._make_mask_static
+            preview_actions, text="删除关键帧", width=96, command=self._delete_current_keyframe,
+            corner_radius=theme.RADIUS_PILL, **theme.tonal_button(),
+        ).grid(row=0, column=1, sticky="e", padx=(8, 4))
+        ctk.CTkButton(
+            preview_actions, text="转为静态", width=84, command=self._make_mask_static,
+            corner_radius=theme.RADIUS_PILL, **theme.tonal_button(),
         ).grid(row=0, column=2, sticky="e")
 
         # ===== 设置面板 =====
-        settings = ctk.CTkScrollableFrame(panel_preview, corner_radius=12, height=300)
+        settings = ctk.CTkScrollableFrame(
+            panel_preview, corner_radius=theme.RADIUS_WIDGET, height=300, fg_color=theme.SURFACE_DIM
+        )
         settings.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=(0, 6))
         settings.grid_columnconfigure(1, weight=1)
         self.settings_frame = settings
@@ -293,58 +315,73 @@ class SubtitleBlurApp(ctk.CTk):
             sf.grid(row=row, column=0, columnspan=2, sticky="ew", padx=12, pady=(10, 2))
             sf.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(
-                sf, text=label, font=ctk.CTkFont(size=11, weight="bold"), text_color="#4a7fc1"
+                sf, text=label, font=ctk.CTkFont(size=11, weight="bold"), text_color=theme.PRIMARY
             ).grid(row=0, column=0, sticky="w")
-            ctk.CTkFrame(sf, height=1, fg_color="#1e3a5f").grid(row=0, column=1, sticky="ew", padx=(8, 0))
+            ctk.CTkFrame(sf, height=1, fg_color=theme.SURFACE_3).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        def _field_label(text: str, row: int) -> None:
+            ctk.CTkLabel(settings, text=text, text_color=theme.TEXT).grid(
+                row=row, column=0, sticky="w", padx=14, pady=(6, 4)
+            )
 
         # ── 遮罩设置 ──
         _section("▸  遮罩设置", 0)
-        ctk.CTkLabel(settings, text="遮罩").grid(row=1, column=0, sticky="w", padx=14, pady=(6, 4))
+        _field_label("遮罩", 1)
         mask_row = ctk.CTkFrame(settings, fg_color="transparent")
         mask_row.grid(row=1, column=1, sticky="ew", padx=12, pady=(6, 4))
         mask_row.grid_columnconfigure(0, weight=1)
         self.mask_menu = ctk.CTkOptionMenu(
-            mask_row, variable=self.mask_var, values=["无遮罩"], command=self._on_mask_select
+            mask_row, variable=self.mask_var, values=["无遮罩"], command=self._on_mask_select,
+            corner_radius=theme.RADIUS_WIDGET, **theme.option_menu(),
         )
         self.mask_menu.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(mask_row, text="＋", width=34, command=self._add_mask).grid(row=0, column=1, padx=(0, 4))
+        ctk.CTkButton(
+            mask_row, text="＋", width=34, command=self._add_mask,
+            corner_radius=theme.RADIUS_WIDGET, **theme.tonal_button(),
+        ).grid(row=0, column=1, padx=(0, 4))
         ctk.CTkButton(
             mask_row, text="－", width=34, command=self._delete_mask,
-            fg_color="#7f1d1d", hover_color="#991b1b",
+            corner_radius=theme.RADIUS_WIDGET, **theme.danger_button(),
         ).grid(row=0, column=2)
 
-        ctk.CTkLabel(settings, text="算法").grid(row=2, column=0, sticky="w", padx=14, pady=(6, 4))
+        _field_label("算法", 2)
         ctk.CTkOptionMenu(
             settings,
             variable=self.blur_method_var,
             values=[label for label, _ in self.blur_options],
             command=self._on_blur_method_change,
+            corner_radius=theme.RADIUS_WIDGET,
+            **theme.option_menu(),
         ).grid(row=2, column=1, sticky="ew", padx=12, pady=(6, 4))
 
         strength_row = ctk.CTkFrame(settings, fg_color="transparent")
         strength_row.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 4))
         strength_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(strength_row, text="强度").grid(row=0, column=0, sticky="w", padx=(2, 8))
-        ctk.CTkSlider(
-            strength_row, from_=5, to=120, variable=self.blur_strength, command=self._on_blur_strength_change
-        ).grid(row=0, column=1, sticky="ew")
-        ctk.CTkLabel(strength_row, textvariable=self.blur_strength, width=34, anchor="e").grid(
-            row=0, column=2, padx=(6, 0)
+        ctk.CTkLabel(strength_row, text="强度", text_color=theme.TEXT).grid(
+            row=0, column=0, sticky="w", padx=(2, 8)
         )
+        ctk.CTkSlider(
+            strength_row, from_=5, to=120, variable=self.blur_strength,
+            command=self._on_blur_strength_change, **theme.slider(),
+        ).grid(row=0, column=1, sticky="ew")
+        ctk.CTkLabel(strength_row, textvariable=self.blur_strength, width=34, anchor="e",
+                     text_color=theme.TEXT_SECONDARY).grid(row=0, column=2, padx=(6, 0))
         ctk.CTkLabel(
             settings,
             text="提示：先「＋」添加遮罩再框选；在不同帧重新框选即生成移动关键帧以跟随水印。",
-            text_color="#5c6b82", font=ctk.CTkFont(size=11), wraplength=360, justify="left",
+            text_color=theme.TEXT_DISABLED, font=ctk.CTkFont(size=11), wraplength=360, justify="left",
         ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
 
         # ── 编码设置 ──
         _section("▸  编码设置", 5)
-        ctk.CTkLabel(settings, text="编码器").grid(row=6, column=0, sticky="w", padx=14, pady=(6, 6))
+        _field_label("编码器", 6)
         ctk.CTkOptionMenu(
             settings,
             variable=self.encoder_var,
             values=[label for label, _ in self.encoder_options],
             command=self._on_encoder_change,
+            corner_radius=theme.RADIUS_WIDGET,
+            **theme.option_menu(),
         ).grid(row=6, column=1, sticky="ew", padx=12, pady=(6, 6))
 
         # ── 处理选项 ──
@@ -353,32 +390,47 @@ class SubtitleBlurApp(ctk.CTk):
         opts.grid(row=8, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
         opts.grid_columnconfigure(0, weight=1)
         ctk.CTkCheckBox(
-            opts, text="去除音轨", variable=self.remove_audio, corner_radius=8, command=self._on_option_toggle
+            opts, text="去除音轨", variable=self.remove_audio, corner_radius=8,
+            command=self._on_option_toggle, **theme.checkbox(),
         ).grid(row=0, column=0, sticky="w", pady=3)
         ctk.CTkCheckBox(
-            opts, text="裁剪为 9:16", variable=self.crop_9x16, corner_radius=8, command=self._on_option_toggle
+            opts, text="裁剪为 9:16", variable=self.crop_9x16, corner_radius=8,
+            command=self._on_option_toggle, **theme.checkbox(),
         ).grid(row=1, column=0, sticky="w", pady=3)
         ctk.CTkCheckBox(
-            opts, text="导出后从列表移除", variable=self.remove_after, corner_radius=8, command=self._on_option_toggle
+            opts, text="导出后从列表移除", variable=self.remove_after, corner_radius=8,
+            command=self._on_option_toggle, **theme.checkbox(),
         ).grid(row=2, column=0, sticky="w", pady=3)
 
         # ── 路径与导出 ──
         _section("▸  路径与导出", 9)
-        ctk.CTkLabel(settings, text="ffmpeg").grid(row=10, column=0, sticky="w", padx=14, pady=(6, 2))
+        _field_label("ffmpeg", 10)
         path_frame = ctk.CTkFrame(settings, fg_color="transparent")
         path_frame.grid(row=10, column=1, sticky="ew", padx=12, pady=(6, 2))
         path_frame.grid_columnconfigure(0, weight=1)
-        self.ffmpeg_entry = ctk.CTkEntry(path_frame, placeholder_text="自动/手动选择", corner_radius=8)
+        self.ffmpeg_entry = ctk.CTkEntry(
+            path_frame, placeholder_text="自动/手动选择",
+            corner_radius=theme.RADIUS_WIDGET, **theme.entry(),
+        )
         self.ffmpeg_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(path_frame, text="浏览", width=72, command=self.choose_ffmpeg).grid(row=0, column=1)
+        ctk.CTkButton(
+            path_frame, text="浏览", width=72, command=self.choose_ffmpeg,
+            corner_radius=theme.RADIUS_WIDGET, **theme.tonal_button(),
+        ).grid(row=0, column=1)
 
-        ctk.CTkLabel(settings, text="导出目录").grid(row=11, column=0, sticky="w", padx=14, pady=(6, 6))
+        _field_label("导出目录", 11)
         out_frame = ctk.CTkFrame(settings, fg_color="transparent")
         out_frame.grid(row=11, column=1, sticky="ew", padx=12, pady=(6, 6))
         out_frame.grid_columnconfigure(0, weight=1)
-        self.output_entry = ctk.CTkEntry(out_frame, placeholder_text="默认：源文件目录", corner_radius=8)
+        self.output_entry = ctk.CTkEntry(
+            out_frame, placeholder_text="默认：源文件目录",
+            corner_radius=theme.RADIUS_WIDGET, **theme.entry(),
+        )
         self.output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(out_frame, text="选择", width=72, command=self.choose_output_dir).grid(row=0, column=1)
+        ctk.CTkButton(
+            out_frame, text="选择", width=72, command=self.choose_output_dir,
+            corner_radius=theme.RADIUS_WIDGET, **theme.tonal_button(),
+        ).grid(row=0, column=1)
 
         # ── 动作按钮 ──
         action_row = ctk.CTkFrame(settings, fg_color="transparent")
@@ -387,10 +439,11 @@ class SubtitleBlurApp(ctk.CTk):
         ctk.CTkButton(
             action_row, text="开始处理", command=self.start_processing, height=42,
             font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=21, **theme.filled_button(),
         ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ctk.CTkButton(
             action_row, text="预览设置", command=self.preview_settings, height=42,
-            fg_color="#1e4d8c", hover_color="#163d70",
+            corner_radius=21, **theme.tonal_button(),
         ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         self._clear_preview_canvas()
@@ -875,15 +928,15 @@ class SubtitleBlurApp(ctk.CTk):
             rx1, ry1, rx2, ry2 = self._video_to_display_rect(rect)
             if i == self.active_mask_index:
                 self.preview_canvas.create_rectangle(
-                    rx1, ry1, rx2, ry2, outline="#e74c3c", width=2, tags="roi"
+                    rx1, ry1, rx2, ry2, outline=theme.ROI_ACTIVE, width=2, tags="roi"
                 )
             else:
                 self.preview_canvas.create_rectangle(
-                    rx1, ry1, rx2, ry2, outline="#f59e0b", width=1, dash=(4, 3), tags="roi"
+                    rx1, ry1, rx2, ry2, outline=theme.ROI_OTHER, width=1, dash=(4, 3), tags="roi"
                 )
             self.preview_canvas.create_text(
                 rx1 + 2, ry1 + 8, anchor="w", text=str(i + 1),
-                fill="#ffffff", font=("Arial", 10, "bold"), tags="roi",
+                fill=theme.TEXT, font=("Arial", 10, "bold"), tags="roi",
             )
 
     def _on_canvas_press(self, event: tk.Event) -> None:
@@ -893,7 +946,7 @@ class SubtitleBlurApp(ctk.CTk):
         if self.drag_rect:
             self.preview_canvas.delete(self.drag_rect)
         self.drag_rect = self.preview_canvas.create_rectangle(
-            event.x, event.y, event.x, event.y, outline="#e74c3c", width=2, dash=(3, 2)
+            event.x, event.y, event.x, event.y, outline=theme.ROI_ACTIVE, width=2, dash=(3, 2)
         )
 
     def _on_canvas_drag(self, event: tk.Event) -> None:
@@ -1012,7 +1065,7 @@ class SubtitleBlurApp(ctk.CTk):
             self.preview_size[0] // 2,
             self.preview_size[1] // 2,
             text="拖入或添加视频后在此预览",
-            fill="#4a5568",
+            fill=theme.TEXT_DISABLED,
             font=("Arial", 14),
         )
         self.preview_image = None
@@ -1490,7 +1543,7 @@ class SubtitleBlurApp(ctk.CTk):
             self.list_placeholder = None
         if not self.video_paths:
             self.list_placeholder = ctk.CTkLabel(
-                self.list_frame.inner, text="暂无视频，点击「添加视频」开始", text_color="#4a5568"
+                self.list_frame.inner, text="暂无视频，点击「添加视频」开始", text_color=theme.TEXT_DISABLED
             )
             self.list_placeholder.pack(pady=16)
             self.list_frame.bind_tree()

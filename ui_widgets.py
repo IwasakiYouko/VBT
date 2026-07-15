@@ -10,6 +10,8 @@ from typing import Callable, Optional, Union
 
 import customtkinter as ctk
 
+import theme
+
 TextSource = Union[str, Callable[[], str]]
 
 
@@ -81,8 +83,8 @@ class Tooltip:
             tip.attributes("-topmost", True)
             tk.Label(
                 tip, text=text, justify="left", wraplength=560,
-                bg="#1f2733", fg="#e8edf5", relief="solid", bd=1,
-                padx=8, pady=5, font=("Segoe UI", 9),
+                bg=theme.SURFACE_3, fg=theme.TEXT, relief="flat", bd=0,
+                padx=10, pady=6, font=("Segoe UI", 9),
             ).pack()
             self._tip = tip
         except Exception:
@@ -105,7 +107,7 @@ class XYScrollFrame(ctk.CTkFrame):
     且内容再宽也不会把外层布局撑大（Canvas 视口尺寸独立于内容）。
     """
 
-    def __init__(self, master, fg_color: str = "#141820", **kwargs) -> None:
+    def __init__(self, master, fg_color: str = theme.SURFACE_DIM, **kwargs) -> None:
         super().__init__(master, fg_color=fg_color, **kwargs)
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
