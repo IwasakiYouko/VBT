@@ -270,6 +270,7 @@ class SubtitleBlurApp(ctk.CTk):
         self.preview_canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.preview_canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.preview_canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.bind("<Escape>", self._cancel_drag)
         self.bind("<Configure>", self._on_window_resize)
 
         seek_row = ctk.CTkFrame(preview_frame, fg_color="transparent")
@@ -947,10 +948,38 @@ class SubtitleBlurApp(ctk.CTk):
         )
 
     def _on_canvas_drag(self, event: tk.Event) -> None:
-        # 拖动过程中只更新虚线方框，不渲染遮罩效果；松手后统一预览。
+        # 拖动过程中只更新虚线方框与尺寸标注，不渲染遮罩效果；松手后统一预览。
         if not self.drag_start or not self.drag_rect:
             return
-        self.preview_canvas.coords(self.drag_rect, self.drag_start[0], self.drag_start[1], event.x, event.y)
+        x0, y0 = self.drag_start
+        self.preview_canvas.coords(self.drag_rect, x0, y0, event.x, event.y)
+        self.preview_canvas.delete("dragsize")
+        rect = self._display_to_video_rect(x0, y0, event.x, event.y)
+        if rect:
+            label = f"{rect[2]}×{rect[3]}"
+            tx = min(max(event.x + 12, 8), self.preview_size[0] - 40)
+            ty = min(max(event.y - 12, 10), self.preview_size[1] - 10)
+            # 深色描影 + 浅色文字，保证亮暗画面上都可读。
+            self.preview_canvas.create_text(
+                tx + 1, ty + 1, anchor="w", text=label,
+                fill=theme.TEXT_ON_ACCENT, font=("Arial", 10, "bold"), tags="dragsize",
+            )
+            self.preview_canvas.create_text(
+                tx, ty, anchor="w", text=label,
+                fill=theme.TEXT, font=("Arial", 10, "bold"), tags="dragsize",
+            )
+
+    def _cancel_drag(self, _event=None) -> Optional[str]:
+        """Esc 取消进行中的框选，不提交关键帧。"""
+        if not self.drag_start and not self.drag_rect:
+            return None
+        if self.drag_rect:
+            self.preview_canvas.delete(self.drag_rect)
+            self.drag_rect = None
+        self.preview_canvas.delete("dragsize")
+        self.drag_start = None
+        self._set_status("已取消框选")
+        return "break"
 
     def _on_canvas_release(self, event: tk.Event) -> None:
         if not self.drag_start:
@@ -960,6 +989,7 @@ class SubtitleBlurApp(ctk.CTk):
         if self.drag_rect:
             self.preview_canvas.delete(self.drag_rect)
             self.drag_rect = None
+        self.preview_canvas.delete("dragsize")
         self.drag_start = None
         rect = self._display_to_video_rect(x0, y0, x1, y1)
         if not rect:
